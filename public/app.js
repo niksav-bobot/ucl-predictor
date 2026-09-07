@@ -29,7 +29,7 @@ async function auth() {
 
 async function loadMatches() {
   try {
-    const res = await fetch('/api/matches');
+    const res = await fetch(`/api/matches?userId=${userId}`);
     const matches = await res.json();
     const app = document.getElementById('app');
     app.innerHTML = '<h2>Матчи</h2>';
@@ -42,19 +42,30 @@ async function loadMatches() {
       card.className = 'match-card';
       const kickoff = new Date(match.kickoff_utc).toLocaleString();
       let statusText = match.status === 'scheduled' ? 'Предстоит' : match.status;
+      let predIcon = '';
+      if (match.user_has_predicted) {
+        predIcon = ' ✅';
+      }
       card.innerHTML = `
-        <strong>${match.home_team} vs ${match.away_team}</strong><br>
+        <strong>${match.home_team} vs ${match.away_team}${predIcon}</strong><br>
         Дата: ${kickoff}<br>
         Статус: ${statusText}
         ${match.status === 'finished' ? `<br>Счёт: ${match.home_score} - ${match.away_score}` : ''}
+        ${match.user_prediction ? `<br>Ваш прогноз: ${match.user_prediction.home} - ${match.user_prediction.away}` : ''}
       `;
       if (match.status === 'scheduled') {
         const btn = document.createElement('button');
         btn.className = 'btn-predict';
-        btn.textContent = 'Сделать прогноз';
+        btn.textContent = match.user_has_predicted ? 'Изменить прогноз' : 'Сделать прогноз';
         btn.onclick = () => showPredictionModal(match);
         card.appendChild(btn);
       }
+      const allBtn = document.createElement('button');
+      allBtn.className = 'btn-all-predictions';
+      allBtn.textContent = 'Прогнозы';
+      allBtn.onclick = () => showAllPredictions(match.match_id);
+      card.appendChild(allBtn);
+
       app.appendChild(card);
     });
   } catch (e) {
@@ -108,6 +119,35 @@ async function submitPrediction(matchId, overlay) {
   } catch (e) {
     console.error(e);
     alert('Ошибка сети');
+  }
+}
+
+async function showAllPredictions(matchId) {
+  try {
+    const res = await fetch(`/api/match-predictions/${matchId}`);
+    const preds = await res.json();
+    const existing = document.querySelector('.modal-overlay');
+    if (existing) existing.remove();
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.style.cssText = 'position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:1000;';
+    let tableHtml = '<table><tr><th>Участник</th><th>Прогноз</th><th>Очки</th></tr>';
+    preds.forEach(p => {
+      tableHtml += `<tr><td>${p.displayName}</td><td>${p.predictedHome} - ${p.predictedAway}</td><td>${p.points}</td></tr>`;
+    });
+    tableHtml += '</table>';
+    overlay.innerHTML = `
+      <div style="background:white; padding:20px; border-radius:12px; width:90%; max-width:400px;">
+        <h3>Прогнозы на матч</h3>
+        ${tableHtml}
+        <button id="close-all" style="margin-top:10px; width:100%; padding:10px; background:#999; color:white; border:none; border-radius:8px;">Закрыть</button>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    document.getElementById('close-all').onclick = () => overlay.remove();
+  } catch (e) {
+    console.error(e);
+    alert('Ошибка загрузки прогнозов');
   }
 }
 
