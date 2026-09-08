@@ -20,6 +20,7 @@ const SHEET_ID = process.env.GOOGLE_SHEET_ID;
 
 const FOOTBALL_DATA_API_KEY = process.env.FOOTBALL_DATA_API_KEY;
 const FOOTBALL_DATA_BASE_URL = 'https://api.football-data.org/v4';
+const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 
 // ========== Вспомогательные функции для Google Sheets ==========
 async function getSheetData(sheetName, range) {
@@ -237,6 +238,104 @@ async function fetchUCLMatches() {
   return newRows.length;
 }
 
+// Функция для обновления результатов завершённых матчей
+async function updateFinishedMatches() {
+  if (!FOOTBALL_DATA_API_KEY) {
+    throw new Error('FOOTBALL_DATA_API_KEY не задан');
+  }
+  const season = '2026';
+  const url = `${FOOTBALL_DATA_BASE_URL}/competitions/CL/matches?season=${season}`;
+  const response = await fetch(url, {
+    headers: { 'X-Auth-Token': FOOTBALL_DATA_API_KEY },
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Football-Data.org API error: ${response.status} ${text}`);
+  }
+  const data = await response.json();
+  const apiMatches = data.matches || [];
+
+  // Получаем текущие матчи из листа, включая заголовок
+  const sheetMatches = await getSheetData('Matches', 'A:Z');
+  const matchRows = filterHeader(sheetMatches, 'match_id');
+
+  for (const apiMatch of apiMatches) {
+    if (apiMatch.status !== 'FINISHED') continue; // только завершённые
+
+    const matchId = String(apiMatch.id);
+    const sheetIndex = matchRows.findIndex(row => row[0] === matchId);
+    if (sheetIndex === -1) continue; // нет в листе
+
+    const currentRow = matchRows[sheetIndex];
+    const currentStatus = currentRow[5];
+    const currentHome = currentRow[6];
+    const currentAway = currentRow[7];
+
+    // Если уже finished и счёт заполнен, пропускаем
+    if (currentStatus === 'finished' && currentHome !== '' && currentAway !== '') {
+      continue;
+    }
+
+    // Получаем счёт из API
+    const homeScore = apiMatch.score?.fullTime?.home;
+    const awayScore = apiMatch.score?.fullTime?.away;
+    if (homeScore === undefined || awayScore === undefined) continue;
+
+    // Обновляем строку матча в листе
+    const updatedRow = [...currentRow];
+    updatedRow[5] = 'finished';
+    updatedRow[6] = homeScore;
+    updatedRow[7] = awayScore;
+    updatedRow[8] = new Date().toISOString();
+
+    // Находим фактический индекс в sheetMatches (с учётом заголовка)
+    const actualRowIndex = sheetMatches.findIndex(row => row[0] === matchId);
+    if (actualRowIndex === -1) continue;
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `Matches!A${actualRowIndex + 1}:Z${actualRowIndex + 1}`,
+      valueInputOption: 'USER_ENTERED',
+      resource: { values: [updatedRow] },
+    });
+
+    // Пересчитываем очки для прогнозов этого матча
+    await recalculatePointsForMatch(matchId, homeScore, awayScore);
+  }
+  return true;
+}
+
+// Функция пересчёта очков для конкретного матча
+async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
+  const predictions = filterHeader(await getSheetData('Predictions', 'A:Z'), 'prediction_id');
+  const matchPredictions = predictions.filter(row => row[2] === matchId);
+
+  for (const pred of matchPredictions) {
+    const predHome = Number(pred[3]);
+    const predAway = Number(pred[4]);
+    const { points, type } = calculatePoints(predHome, predAway, homeScore, awayScore);
+
+    // Обновляем прогноз
+    const updatedPred = [pred[0], pred[1], pred[2], pred[3], pred[4], pred[5], pred[6], points, type];
+    await updateRow('Predictions', 0, pred[0], updatedPred);
+
+    // Обновляем статистику пользователя
+    const userId = pred[1];
+    const users = filterHeader(await getSheetData('Users', 'A:Z'), 'user_id');
+    const userIndex = users.findIndex(row => row[0] === String(userId));
+    if (userIndex === -1) continue;
+    const allUsers = await getSheetData('Users', 'A:Z');
+    const user = [...allUsers[userIndex + 1]]; // +1 из-за заголовка
+    user[4] = Number(user[4]) + points;
+    if (points > 0) user[6] = Number(user[6]) + 1;
+    if (type === 'exact') user[7] = Number(user[7]) + 1;
+    if (type === 'difference') user[8] = Number(user[8]) + 1;
+    if (type === 'draw') user[9] = Number(user[9]) + 1;
+    if (type === 'outcome') user[10] = Number(user[10]) + 1;
+    if (type === 'miss') user[11] = Number(user[11]) + 1;
+    await updateRow('Users', 0, userId, user);
+  }
+}
+
 // ========== Маршруты API ==========
 
 // Авторизация / регистрация
@@ -270,7 +369,7 @@ app.post('/api/auth', async (req, res) => {
   }
 });
 
-// Получение матчей (теперь с информацией о прогнозах пользователя)
+// Получение матчей (с информацией о прогнозах пользователя)
 app.get('/api/matches', async (req, res) => {
   const userId = req.query.userId;
   const matches = filterHeader(await getSheetData('Matches', 'A:Z'), 'match_id');
@@ -341,7 +440,7 @@ app.post('/api/predictions', async (req, res) => {
   res.json({ success: true });
 });
 
-// Ручной ввод результата (админ)
+// Ручной ввод результата (админ) - оставлен для совместимости
 app.post('/api/admin/match-result', async (req, res) => {
   const userId = extractUserId(req);
   const adminIds = process.env.ADMIN_USER_IDS.split(',').map(Number);
@@ -368,30 +467,8 @@ app.post('/api/admin/match-result', async (req, res) => {
   updatedMatch[8] = new Date().toISOString();
   await updateRow('Matches', 0, matchId, updatedMatch);
 
-  const predictions = filterHeader(await getSheetData('Predictions', 'A:Z'), 'prediction_id');
-  const matchPredictions = predictions.filter(row => row[2] === matchId);
-  for (const pred of matchPredictions) {
-    const predHome = Number(pred[3]);
-    const predAway = Number(pred[4]);
-    const { points, type } = calculatePoints(predHome, predAway, hScore, aScore);
-    const updatedPred = [pred[0], pred[1], pred[2], pred[3], pred[4], pred[5], pred[6], points, type];
-    await updateRow('Predictions', 0, pred[0], updatedPred);
-    const userId = pred[1];
-    const users = filterHeader(await getSheetData('Users', 'A:Z'), 'user_id');
-    const userIndex = users.findIndex(row => row[0] === String(userId));
-    if (userIndex === -1) continue;
-    const allUsers = await getSheetData('Users', 'A:Z');
-    const user = [...allUsers[userIndex + 1]];
-    user[4] = Number(user[4]) + points;
-    if (points > 0) user[6] = Number(user[6]) + 1;
-    if (type === 'exact') user[7] = Number(user[7]) + 1;
-    if (type === 'difference') user[8] = Number(user[8]) + 1;
-    if (type === 'draw') user[9] = Number(user[9]) + 1;
-    if (type === 'outcome') user[10] = Number(user[10]) + 1;
-    if (type === 'miss') user[11] = Number(user[11]) + 1;
-    await updateRow('Users', 0, userId, user);
-  }
-  res.json({ success: true, processed: matchPredictions.length });
+  await recalculatePointsForMatch(matchId, hScore, aScore);
+  res.json({ success: true, processed: true });
 });
 
 // Получение прогнозов всех пользователей на конкретный матч
@@ -456,6 +533,21 @@ app.post('/api/admin/sync-matches', async (req, res) => {
     res.json({ success: true, fetched: count });
   } catch (error) {
     console.error('Sync error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Автоматическое обновление результатов (защищено API-ключом)
+app.post('/api/admin/update-results', async (req, res) => {
+  const apiKey = req.headers['x-admin-api-key'] || req.body.apiKey;
+  if (!ADMIN_API_KEY || apiKey !== ADMIN_API_KEY) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  try {
+    await updateFinishedMatches();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Update results error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
