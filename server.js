@@ -22,6 +22,7 @@ const FOOTBALL_DATA_API_KEY = process.env.FOOTBALL_DATA_API_KEY;
 const FOOTBALL_DATA_BASE_URL = 'https://api.football-data.org/v4';
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 
+// ========== Вспомогательные функции ==========
 async function getSheetData(sheetName, range) {
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
@@ -68,6 +69,7 @@ function extractUserId(req) {
   return req.body.userId || req.query.userId || null;
 }
 
+// ========== Маппинг статусов ==========
 function mapStatus(apiStatus) {
   if (apiStatus === 'SCHEDULED' || apiStatus === 'TIMED') return 'scheduled';
   if (apiStatus === 'LIVE' || apiStatus === 'IN_PLAY') return 'live';
@@ -76,6 +78,7 @@ function mapStatus(apiStatus) {
   return apiStatus.toLowerCase();
 }
 
+// ========== Перевод названий команд ==========
 const teamTranslations = {
   'Real Madrid CF': 'Реал Мадрид',
   'FC Barcelona': 'Барселона',
@@ -158,6 +161,7 @@ const teamTranslations = {
   'Sabah FK': 'Сабах',
 };
 
+// ========== Работа с Football-Data.org ==========
 function mapStage(apiStage) {
   const stages = {
     'PRELIMINARY': 'Предварительный раунд',
@@ -189,7 +193,7 @@ async function fetchUCLMatches() {
   }
   const data = await response.json();
   const matches = data.matches || [];
-  const existingMatches = filterHeader(await getSheetData('Matches', 'A:Z'), 'match_id');
+  const existingMatches = filterHeader(await getSheetData('Matches', 'A:J'), 'match_id');
   const existingIds = new Set(existingMatches.map(row => row[0]));
 
   const newRows = [];
@@ -226,7 +230,7 @@ async function fetchUCLMatches() {
       homeScore,
       awayScore,
       resultUpdatedAt,
-      'FALSE'
+      'FALSE'  // score_locked
     ]);
     existingIds.add(matchId);
   }
@@ -251,7 +255,7 @@ async function updateFinishedMatches() {
   const data = await response.json();
   const apiMatches = data.matches || [];
 
-  const sheetMatches = await getSheetData('Matches', 'A:I');
+  const sheetMatches = await getSheetData('Matches', 'A:J');
   const matchRows = filterHeader(sheetMatches, 'match_id');
 
   for (const apiMatch of apiMatches) {
@@ -262,7 +266,7 @@ async function updateFinishedMatches() {
     if (sheetIndex === -1) continue;
 
     const currentRow = matchRows[sheetIndex];
-    const scoreLocked = currentRow[8] === 'TRUE';
+    const scoreLocked = currentRow[9] === 'TRUE'; // колонка J
 
     if (scoreLocked) continue;
 
@@ -286,7 +290,7 @@ async function updateFinishedMatches() {
     if (actualRowIndex === -1) continue;
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
-      range: `Matches!A${actualRowIndex + 1}:I${actualRowIndex + 1}`,
+      range: `Matches!A${actualRowIndex + 1}:J${actualRowIndex + 1}`,
       valueInputOption: 'USER_ENTERED',
       resource: { values: [updatedRow] },
     });
@@ -312,7 +316,7 @@ async function fetchMatchEvents(matchId) {
 }
 
 async function updateMatchEventsForFinished() {
-  const finishedMatches = filterHeader(await getSheetData('Matches', 'A:I'), 'match_id')
+  const finishedMatches = filterHeader(await getSheetData('Matches', 'A:J'), 'match_id')
     .filter(row => row[5] === 'finished');
 
   const existingEvents = filterHeader(await getSheetData('MatchEvents', 'A:G'), 'match_id');
@@ -380,11 +384,14 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
   }
 }
 
+// ========== Маршруты API ==========
+
 app.post('/api/auth', async (req, res) => {
   const initDataString = req.body.initData;
   if (!initDataString) {
     return res.status(400).json({ error: 'initData required' });
   }
+  // Проверка подписи временно отключена
   const params = new URLSearchParams(initDataString);
   const user = JSON.parse(params.get('user'));
   const userId = user.id;
@@ -411,7 +418,7 @@ app.post('/api/auth', async (req, res) => {
 
 app.get('/api/matches', async (req, res) => {
   const userId = req.query.userId;
-  const matches = filterHeader(await getSheetData('Matches', 'A:I'), 'match_id');
+  const matches = filterHeader(await getSheetData('Matches', 'A:J'), 'match_id');
   let userPredictions = [];
   if (userId) {
     const predictions = filterHeader(await getSheetData('Predictions', 'A:Z'), 'prediction_id');
@@ -443,7 +450,7 @@ app.post('/api/predictions', async (req, res) => {
   if (!userId || !matchId || predictedHome === undefined || predictedAway === undefined) {
     return res.status(400).json({ error: 'Missing parameters' });
   }
-  const matches = filterHeader(await getSheetData('Matches', 'A:I'), 'match_id');
+  const matches = filterHeader(await getSheetData('Matches', 'A:J'), 'match_id');
   const match = matches.find(row => row[0] === matchId);
   if (!match) return res.status(404).json({ error: 'Match not found' });
   const kickoff = new Date(match[4]);
@@ -493,16 +500,16 @@ app.post('/api/admin/match-result', async (req, res) => {
   if (isNaN(hScore) || isNaN(aScore) || hScore < 0 || aScore < 0 || hScore > 20 || aScore > 20) {
     return res.status(400).json({ error: 'Invalid score' });
   }
-  const matches = filterHeader(await getSheetData('Matches', 'A:I'), 'match_id');
+  const matches = filterHeader(await getSheetData('Matches', 'A:J'), 'match_id');
   const matchIndex = matches.findIndex(row => row[0] === matchId);
   if (matchIndex === -1) return res.status(404).json({ error: 'Match not found' });
-  const allMatches = await getSheetData('Matches', 'A:I');
+  const allMatches = await getSheetData('Matches', 'A:J');
   const updatedMatch = [...allMatches[matchIndex + 1]];
   updatedMatch[5] = 'finished';
   updatedMatch[6] = hScore;
   updatedMatch[7] = aScore;
   updatedMatch[8] = new Date().toISOString();
-  updatedMatch[8] = 'TRUE';
+  updatedMatch[9] = 'TRUE'; // блокируем автоперезапись
   await updateRow('Matches', 0, matchId, updatedMatch);
 
   await recalculatePointsForMatch(matchId, hScore, aScore);
@@ -622,7 +629,7 @@ app.post('/api/admin/recalculate-all', async (req, res) => {
     return res.status(403).json({ error: 'Forbidden' });
   }
   try {
-    const allMatches = filterHeader(await getSheetData('Matches', 'A:I'), 'match_id');
+    const allMatches = filterHeader(await getSheetData('Matches', 'A:J'), 'match_id');
     const finishedMatches = allMatches.filter(row => row[5] === 'finished' && row[6] !== '' && row[7] !== '');
     for (const match of finishedMatches) {
       const matchId = match[0];
