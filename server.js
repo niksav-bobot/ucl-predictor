@@ -230,7 +230,7 @@ async function fetchUCLMatches() {
       homeScore,
       awayScore,
       resultUpdatedAt,
-      'FALSE'  // score_locked
+      'FALSE'
     ]);
     existingIds.add(matchId);
   }
@@ -266,7 +266,7 @@ async function updateFinishedMatches() {
     if (sheetIndex === -1) continue;
 
     const currentRow = matchRows[sheetIndex];
-    const scoreLocked = currentRow[9] === 'TRUE'; // колонка J
+    const scoreLocked = currentRow[9] === 'TRUE';
 
     if (scoreLocked) continue;
 
@@ -322,9 +322,10 @@ async function updateMatchEventsForFinished() {
   const existingEvents = filterHeader(await getSheetData('MatchEvents', 'A:G'), 'match_id');
   const existingMatchIds = new Set(existingEvents.map(row => row[0]));
 
+  // Обрабатываем не более 4 матчей за вызов, чтобы уложиться в 30 секунд
   const matchesToProcess = finishedMatches
     .filter(match => !existingMatchIds.has(match[0]))
-    .slice(0, 8);
+    .slice(0, 4);
 
   for (const match of matchesToProcess) {
     const matchId = match[0];
@@ -348,8 +349,9 @@ async function updateMatchEventsForFinished() {
       console.error(`Ошибка получения событий для матча ${matchId}:`, err.message);
     }
 
+    // Пауза 5 секунд между запросами
     if (match !== matchesToProcess[matchesToProcess.length - 1]) {
-      await new Promise(resolve => setTimeout(resolve, 7000));
+      await new Promise(resolve => setTimeout(resolve, 5000));
     }
   }
   return matchesToProcess.length;
@@ -662,7 +664,17 @@ app.post('/api/admin/recalculate-all', async (req, res) => {
       await updateRow('Users', 0, user[0], user);
     }
 
-    // Шаг 2: Пересчитываем очки для всех завершённых матчей
+    // Шаг 2: Сбрасываем очки в листе Predictions
+    const allPredictions = await getSheetData('Predictions', 'A:Z');
+    const predictionRows = filterHeader(allPredictions, 'prediction_id');
+    for (const pred of predictionRows) {
+      const updatedPred = [...pred];
+      updatedPred[7] = 0;
+      updatedPred[8] = '';
+      await updateRow('Predictions', 0, pred[0], updatedPred);
+    }
+
+    // Шаг 3: Пересчитываем очки для всех завершённых матчей
     const allMatches = filterHeader(await getSheetData('Matches', 'A:J'), 'match_id');
     const finishedMatches = allMatches.filter(row => row[5] === 'finished' && row[6] !== '' && row[7] !== '');
     for (const match of finishedMatches) {
