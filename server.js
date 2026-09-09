@@ -504,7 +504,7 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
   }
 }
 
-// ========== Telegram Long Polling ==========
+// ========== Telegram Long Polling (только успешные ответы) ==========
 let telegramOffset = 0;
 
 async function callTelegram(method, params) {
@@ -548,79 +548,58 @@ async function processTelegramMessage(msg) {
     ]]);
   }
 
-  try {
-    const parsed = parsePredictionText(text);
-    if (!parsed) {
-      await callTelegram('sendMessage', {
-        chat_id: chatId,
-        text: 'Не удалось распознать матч и счёт. Используйте формат: "Команда1 - Команда2 Счёт" или /predict Команда1 - Команда2 Счёт.'
-      });
-      return;
-    }
-
-    const homeNormalized = normalizeTeamName(parsed.home);
-    const awayNormalized = normalizeTeamName(parsed.away);
-
-    const matches = filterHeader(await getSheetData('Matches', 'A:J'), 'match_id');
-    const match = matches.find(m => {
-      const home = (m[2] || '').toLowerCase().trim();
-      const away = (m[3] || '').toLowerCase().trim();
-      return home === homeNormalized.toLowerCase() &&
-             away === awayNormalized.toLowerCase();
-    });
-
-    if (!match) {
-      await callTelegram('sendMessage', {
-        chat_id: chatId,
-        text: `Матч "${parsed.home} - ${parsed.away}" не найден. Проверьте названия команд.`
-      });
-      return;
-    }
-
-    const matchId = match[0];
-    const status = match[5];
-    const kickoff = new Date(match[4]);
-    if (status !== 'scheduled' || Date.now() >= kickoff.getTime()) {
-      await callTelegram('sendMessage', {
-        chat_id: chatId,
-        text: `Матч уже начался или завершён, прогнозы не принимаются.`
-      });
-      return;
-    }
-
-    const predictions = filterHeader(await getSheetData('Predictions', 'A:Z'), 'prediction_id');
-    const existingIndex = predictions.findIndex(row => row[1] === String(userId) && row[2] === matchId);
-    if (existingIndex !== -1) {
-      const row = predictions[existingIndex];
-      const updatedRow = [row[0], userId, matchId, parsed.homeScore, parsed.awayScore, row[5], new Date().toISOString(), 0, ''];
-      await updateRow('Predictions', 0, row[0], updatedRow);
-    } else {
-      const predictionId = `${userId}_${matchId}`;
-      await appendRows('Predictions', [[
-        predictionId,
-        userId,
-        matchId,
-        parsed.homeScore,
-        parsed.awayScore,
-        new Date().toISOString(),
-        new Date().toISOString(),
-        0,
-        ''
-      ]]);
-    }
-
-    await callTelegram('sendMessage', {
-      chat_id: chatId,
-      text: `✅ Прогноз сохранён: ${match[2]} ${parsed.homeScore}:${parsed.awayScore} ${match[3]}`
-    });
-
-  } catch (err) {
-    console.error('Ошибка обработки сообщения:', err);
-    await callTelegram('sendMessage', {
-      chat_id: chatId,
-      text: 'Произошла внутренняя ошибка. Попробуйте позже.'
-    });
+  const parsed = parsePredictionText(text);
+  if (!parsed) {
+    return; // молчим
   }
+
+  const homeNormalized = normalizeTeamName(parsed.home);
+  const awayNormalized = normalizeTeamName(parsed.away);
+
+  const matches = filterHeader(await getSheetData('Matches', 'A:J'), 'match_id');
+  const match = matches.find(m => {
+    const home = (m[2] || '').toLowerCase().trim();
+    const away = (m[3] || '').toLowerCase().trim();
+    return home === homeNormalized.toLowerCase() &&
+           away === awayNormalized.toLowerCase();
+  });
+
+  if (!match) {
+    return; // молчим
+  }
+
+  const matchId = match[0];
+  const status = match[5];
+  const kickoff = new Date(match[4]);
+  if (status !== 'scheduled' || Date.now() >= kickoff.getTime()) {
+    return; // молчим
+  }
+
+  const predictions = filterHeader(await getSheetData('Predictions', 'A:Z'), 'prediction_id');
+  const existingIndex = predictions.findIndex(row => row[1] === String(userId) && row[2] === matchId);
+  if (existingIndex !== -1) {
+    const row = predictions[existingIndex];
+    const updatedRow = [row[0], userId, matchId, parsed.homeScore, parsed.awayScore, row[5], new Date().toISOString(), 0, ''];
+    await updateRow('Predictions', 0, row[0], updatedRow);
+  } else {
+    const predictionId = `${userId}_${matchId}`;
+    await appendRows('Predictions', [[
+      predictionId,
+      userId,
+      matchId,
+      parsed.homeScore,
+      parsed.awayScore,
+      new Date().toISOString(),
+      new Date().toISOString(),
+      0,
+      ''
+    ]]);
+  }
+
+  await callTelegram('sendMessage', {
+    chat_id: chatId,
+    text: `✅ Прогноз сохранён: ${match[2]} ${parsed.homeScore}:${parsed.awayScore} ${match[3]}`
+  });
 }
 
 function parsePredictionText(text) {
