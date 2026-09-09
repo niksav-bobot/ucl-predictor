@@ -364,15 +364,32 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
     const predAway = Number(pred[4]);
     const { points, type } = calculatePoints(predHome, predAway, homeScore, awayScore);
 
+    // Старые очки и тип из листа Predictions
+    const oldPoints = Number(pred[7]);
+    const oldType = pred[8] || '';
+
+    // Обновляем прогноз
     const updatedPred = [pred[0], pred[1], pred[2], pred[3], pred[4], pred[5], pred[6], points, type];
     await updateRow('Predictions', 0, pred[0], updatedPred);
 
+    // Обновляем статистику пользователя: сначала вычитаем старые очки, затем добавляем новые
     const userId = pred[1];
     const users = filterHeader(await getSheetData('Users', 'A:Z'), 'user_id');
     const userIndex = users.findIndex(row => row[0] === String(userId));
     if (userIndex === -1) continue;
     const allUsers = await getSheetData('Users', 'A:Z');
     const user = [...allUsers[userIndex + 1]];
+
+    // Вычитаем старые показатели
+    user[4] = Number(user[4]) - oldPoints;
+    if (oldPoints > 0) user[6] = Number(user[6]) - 1;
+    if (oldType === 'exact') user[7] = Number(user[7]) - 1;
+    if (oldType === 'difference') user[8] = Number(user[8]) - 1;
+    if (oldType === 'draw') user[9] = Number(user[9]) - 1;
+    if (oldType === 'outcome') user[10] = Number(user[10]) - 1;
+    if (oldType === 'miss') user[11] = Number(user[11]) - 1;
+
+    // Добавляем новые показатели
     user[4] = Number(user[4]) + points;
     if (points > 0) user[6] = Number(user[6]) + 1;
     if (type === 'exact') user[7] = Number(user[7]) + 1;
@@ -380,6 +397,7 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
     if (type === 'draw') user[9] = Number(user[9]) + 1;
     if (type === 'outcome') user[10] = Number(user[10]) + 1;
     if (type === 'miss') user[11] = Number(user[11]) + 1;
+
     await updateRow('Users', 0, userId, user);
   }
 }
@@ -629,6 +647,22 @@ app.post('/api/admin/recalculate-all', async (req, res) => {
     return res.status(403).json({ error: 'Forbidden' });
   }
   try {
+    // Шаг 1: Сбрасываем статистику всех пользователей в ноль
+    const allUsers = await getSheetData('Users', 'A:Z');
+    const userRows = filterHeader(allUsers, 'user_id');
+    for (let i = 0; i < userRows.length; i++) {
+      const user = [...userRows[i]];
+      user[4] = 0; // total_points
+      user[6] = 0; // successful_predictions
+      user[7] = 0; // exact_scores
+      user[8] = 0; // goal_difference
+      user[9] = 0; // draws
+      user[10] = 0; // outcomes
+      user[11] = 0; // misses
+      await updateRow('Users', 0, user[0], user);
+    }
+
+    // Шаг 2: Пересчитываем очки для всех завершённых матчей
     const allMatches = filterHeader(await getSheetData('Matches', 'A:J'), 'match_id');
     const finishedMatches = allMatches.filter(row => row[5] === 'finished' && row[6] !== '' && row[7] !== '');
     for (const match of finishedMatches) {
@@ -637,6 +671,7 @@ app.post('/api/admin/recalculate-all', async (req, res) => {
       const awayScore = Number(match[7]);
       await recalculatePointsForMatch(matchId, homeScore, awayScore);
     }
+
     res.json({ success: true, processed: finishedMatches.length });
   } catch (error) {
     console.error('Recalculate all error:', error);
