@@ -127,7 +127,6 @@ async function showAllPredictions(match) {
     const res = await fetch(`/api/match-predictions/${match.match_id}`);
     const preds = await res.json();
 
-    // Загружаем события голов
     let events = [];
     if (match.status === 'finished' || match.status === 'live') {
       const evRes = await fetch(`/api/match-events/${match.match_id}`);
@@ -176,6 +175,58 @@ async function showAllPredictions(match) {
   }
 }
 
+async function loadMyPredictions() {
+  try {
+    const res = await fetch(`/api/my-predictions?userId=${userId}`);
+    const predictions = await res.json();
+    const app = document.getElementById('app');
+    app.innerHTML = '<h2>Мои прогнозы</h2>';
+
+    if (predictions.length === 0) {
+      app.innerHTML += '<p>У вас пока нет прогнозов.</p>';
+      return;
+    }
+
+    // Группировка по стадиям
+    const grouped = {};
+    predictions.forEach(p => {
+      const stage = p.stage || 'Другое';
+      if (!grouped[stage]) grouped[stage] = [];
+      grouped[stage].push(p);
+    });
+
+    for (const stage in grouped) {
+      const stageDiv = document.createElement('div');
+      stageDiv.className = 'stage-group';
+      stageDiv.innerHTML = `<h3>${stage}</h3>`;
+      const list = document.createElement('div');
+      list.className = 'prediction-list';
+
+      grouped[stage].forEach(p => {
+        const item = document.createElement('div');
+        item.className = 'prediction-item';
+        const kickoff = new Date(p.kickoff_utc).toLocaleString();
+        const statusText = p.status === 'finished' ? `Счёт: ${p.home_score} - ${p.away_score}` : p.status;
+        const pointText = p.points ? `Очки: ${p.points} (${p.prediction_type})` : '';
+        item.innerHTML = `
+          <strong>${p.home_team} vs ${p.away_team}</strong><br>
+          Дата: ${kickoff}<br>
+          Статус: ${statusText}<br>
+          Ваш прогноз: ${p.predicted_home} - ${p.predicted_away}
+          ${pointText ? `<br>${pointText}` : ''}
+        `;
+        list.appendChild(item);
+      });
+
+      stageDiv.appendChild(list);
+      app.appendChild(stageDiv);
+    }
+  } catch (e) {
+    console.error(e);
+    document.getElementById('app').innerHTML = '<p>Ошибка загрузки прогнозов.</p>';
+  }
+}
+
 async function loadStandings() {
   try {
     const res = await fetch('/api/standings');
@@ -199,6 +250,7 @@ async function loadStandings() {
 }
 
 document.getElementById('nav-matches').addEventListener('click', () => { loadMatches(); });
+document.getElementById('nav-my-predictions').addEventListener('click', () => { loadMyPredictions(); });
 document.getElementById('nav-standings').addEventListener('click', () => { loadStandings(); });
 
 auth();

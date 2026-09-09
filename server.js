@@ -530,7 +530,6 @@ async function processTelegramMessage(msg) {
   const userId = from.id;
   const username = from.username || '';
 
-  // Регистрируем пользователя
   const users = filterHeader(await getSheetData('Users', 'A:Z'), 'user_id');
   const existingUser = users.find(row => row[0] === String(userId));
   if (!existingUser) {
@@ -574,14 +573,12 @@ async function processTelegramMessage(msg) {
     const kickoff = new Date(match[4]);
     if (status !== 'scheduled' || Date.now() >= kickoff.getTime()) continue;
 
-    // Удаляем старые записи
     const predictions = filterHeader(await getSheetData('Predictions', 'A:Z'), 'prediction_id');
     const existingRows = predictions.filter(row => row[1] === String(userId) && row[2] === matchId);
     for (const row of existingRows) {
       await deleteRow('Predictions', row[0]);
     }
 
-    // Добавляем новую
     await appendRows('Predictions', [[
       `${userId}_${matchId}`,
       userId,
@@ -700,6 +697,41 @@ app.get('/api/matches', async (req, res) => {
   res.json(result);
 });
 
+app.get('/api/my-predictions', async (req, res) => {
+  const userId = req.query.userId;
+  if (!userId) {
+    return res.status(400).json({ error: 'userId required' });
+  }
+
+  const matches = filterHeader(await getSheetData('Matches', 'A:J'), 'match_id');
+  const predictions = filterHeader(await getSheetData('Predictions', 'A:Z'), 'prediction_id');
+  const userPredictions = predictions.filter(p => p[1] === String(userId));
+
+  const result = userPredictions.map(pred => {
+    const match = matches.find(m => m[0] === pred[2]);
+    if (!match) return null;
+    return {
+      match_id: match[0],
+      stage: match[1],
+      home_team: match[2],
+      away_team: match[3],
+      kickoff_utc: match[4],
+      status: match[5],
+      home_score: match[6],
+      away_score: match[7],
+      predicted_home: Number(pred[3]),
+      predicted_away: Number(pred[4]),
+      points: Number(pred[7]),
+      prediction_type: pred[8] || '',
+    };
+  }).filter(Boolean);
+
+  // Сортируем по дате
+  result.sort((a, b) => new Date(a.kickoff_utc) - new Date(b.kickoff_utc));
+
+  res.json(result);
+});
+
 app.post('/api/predictions', async (req, res) => {
   const userId = extractUserId(req);
   const { matchId, predictedHome, predictedAway } = req.body;
@@ -719,14 +751,12 @@ app.post('/api/predictions', async (req, res) => {
     return res.status(400).json({ error: 'Invalid score' });
   }
 
-  // Удаляем все предыдущие записи для этого пользователя и матча
   const predictions = filterHeader(await getSheetData('Predictions', 'A:Z'), 'prediction_id');
   const existingRows = predictions.filter(row => row[1] === String(userId) && row[2] === matchId);
   for (const row of existingRows) {
     await deleteRow('Predictions', row[0]);
   }
 
-  // Добавляем новую
   await appendRows('Predictions', [[
     `${userId}_${matchId}`,
     userId,
