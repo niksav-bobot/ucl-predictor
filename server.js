@@ -1,204 +1,650 @@
-const tg = window.Telegram.WebApp;
-tg.ready();
-tg.expand();
+require('dotenv').config();
+const express = require('express');
+const { google } = require('googleapis');
+const crypto = require('crypto');
 
-const userId = tg.initDataUnsafe?.user?.id;
+const app = express();
+app.use(express.json());
+app.use(express.static('public'));
 
-async function auth() {
-  if (!userId) {
-    document.getElementById('app').innerHTML = '<p>Откройте приложение через Telegram.</p>';
-    return;
-  }
-  try {
-    const res = await fetch('/api/auth', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ initData: tg.initData })
-    });
-    const data = await res.json();
-    if (data.userId) {
-      loadMatches();
-    } else {
-      alert('Ошибка авторизации');
-    }
-  } catch (e) {
-    console.error(e);
-    document.getElementById('app').innerHTML = '<p>Ошибка соединения с сервером.</p>';
-  }
+const auth = new google.auth.GoogleAuth({
+  credentials: {
+    client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+    private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+  },
+  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+});
+
+const sheets = google.sheets({ version: 'v4', auth });
+const SHEET_ID = process.env.GOOGLE_SHEET_ID;
+
+const FOOTBALL_DATA_API_KEY = process.env.FOOTBALL_DATA_API_KEY;
+const FOOTBALL_DATA_BASE_URL = 'https://api.football-data.org/v4';
+const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
+
+async function getSheetData(sheetName, range) {
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `${sheetName}!${range}`,
+  });
+  return response.data.values || [];
 }
 
-async function loadMatches() {
-  try {
-    const res = await fetch(`/api/matches?userId=${userId}`);
-    const matches = await res.json();
-    const app = document.getElementById('app');
-    app.innerHTML = '<h2>Матчи</h2>';
-    if (matches.length === 0) {
-      app.innerHTML += '<p>Нет матчей.</p>';
-      return;
+function filterHeader(rows, headerValue) {
+  return rows.filter(row => row[0] !== headerValue);
+}
+
+async function appendRows(sheetName, rows) {
+  if (rows.length === 0) return;
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SHEET_ID,
+    range: `${sheetName}!A:A`,
+    valueInputOption: 'USER_ENTERED',
+    insertDataOption: 'INSERT_ROWS',
+    resource: { values: rows },
+  });
+}
+
+async function updateRow(sheetName, idColumnIndex, idValue, newValues) {
+  const data = await getSheetData(sheetName, 'A:Z');
+  const rowIndex = data.findIndex(row => row[idColumnIndex] === String(idValue));
+  if (rowIndex === -1) return false;
+  const range = `${sheetName}!A${rowIndex + 1}:Z${rowIndex + 1}`;
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SHEET_ID,
+    range,
+    valueInputOption: 'USER_ENTERED',
+    resource: { values: [newValues] },
+  });
+  return true;
+}
+
+function extractUserId(req) {
+  if (req.body.initData) {
+    const params = new URLSearchParams(req.body.initData);
+    const user = JSON.parse(params.get('user') || '{}');
+    return user.id;
+  }
+  return req.body.userId || req.query.userId || null;
+}
+
+function mapStatus(apiStatus) {
+  if (apiStatus === 'SCHEDULED' || apiStatus === 'TIMED') return 'scheduled';
+  if (apiStatus === 'LIVE' || apiStatus === 'IN_PLAY') return 'live';
+  if (apiStatus === 'FINISHED') return 'finished';
+  if (apiStatus === 'POSTPONED') return 'postponed';
+  return apiStatus.toLowerCase();
+}
+
+const teamTranslations = {
+  'Real Madrid CF': 'Реал Мадрид',
+  'FC Barcelona': 'Барселона',
+  'Manchester City FC': 'Манчестер Сити',
+  'Liverpool FC': 'Ливерпуль',
+  'FC Bayern München': 'Бавария',
+  'Paris Saint-Germain FC': 'ПСЖ',
+  'Juventus FC': 'Ювентус',
+  'AC Milan': 'Милан',
+  'Chelsea FC': 'Челси',
+  'Arsenal FC': 'Арсенал',
+  'Borussia Dortmund': 'Боруссия Дортмунд',
+  'Club Atlético de Madrid': 'Атлетико Мадрид',
+  'FC Internazionale Milano': 'Интер',
+  'SSC Napoli': 'Наполи',
+  'FC Porto': 'Порту',
+  'SL Benfica': 'Бенфика',
+  'AFC Ajax': 'Аякс',
+  'Olympique Lyonnais': 'Лион',
+  'AS Monaco FC': 'Монако',
+  'FC Red Bull Salzburg': 'Зальцбург',
+  'FK Shakhtar Donetsk': 'Шахтер',
+  'GNK Dinamo Zagreb': 'Динамо Загреб',
+  'Celtic FC': 'Селтик',
+  'Rangers FC': 'Рейнджерс',
+  'Club Brugge KV': 'Брюгге',
+  'Galatasaray SK': 'Галатасарай',
+  'Fenerbahçe SK': 'Фенербахче',
+  'Olympiacos FC': 'Олимпиакос',
+  'AEK Athens FC': 'АЕК',
+  'Maccabi Haifa FC': 'Маккаби Хайфа',
+  'FC København': 'Копенгаген',
+  'BSC Young Boys': 'Янг Бойз',
+  'FK Crvena Zvezda': 'Црвена Звезда',
+  'Racing Club de Lens': 'Ланс',
+  'Real Sociedad de Fútbol': 'Реал Сосьедад',
+  'PSV': 'ПСВ',
+  'Feyenoord Rotterdam': 'Фейеноорд',
+  'Sporting CP': 'Спортинг',
+  'Sporting Clube de Portugal': 'Спортинг',
+  'FC Viktoria Plzeň': 'Виктория Пльзень',
+  'Stade Brestois 29': 'Брест',
+  'VfB Stuttgart': 'Штутгарт',
+  'Aston Villa FC': 'Астон Вилла',
+  'Bologna FC 1909': 'Болонья',
+  'Girona FC': 'Жирона',
+  'RC Celta de Vigo': 'Сельта',
+  'Real Betis Balompié': 'Бетис',
+  'Sevilla FC': 'Севилья',
+  'Valencia CF': 'Валенсия',
+  'Lazio Roma': 'Лацио',
+  'Atalanta BC': 'Аталанта',
+  'AS Roma': 'Рома',
+  'Olympique de Marseille': 'Марсель',
+  'Lille OSC': 'Лилль',
+  'OGC Nice': 'Ницца',
+  'Stade Rennais FC': 'Ренн',
+  'RC Strasbourg Alsace': 'Страсбур',
+  'FC Nantes': 'Нант',
+  'SC Braga': 'Брага',
+  'RSC Anderlecht': 'Андерлехт',
+  'KRC Genk': 'Генк',
+  'Ferencvárosi TC': 'Ференцварош',
+  'Ludogorets Razgrad': 'Лудогорец',
+  'Qarabağ FK': 'Карабах',
+  'Sparta Praha': 'Спарта Прага',
+  'Slavia Praha': 'Славия Прага',
+  'SK Slavia Praha': 'Славия Прага',
+  'FC Basel 1893': 'Базель',
+  'Grasshopper Club Zürich': 'Грассхоппер',
+  'Manchester United FC': 'Манчестер Юнайтед',
+  'Villarreal CF': 'Вильярреал',
+  'PAE AEK': 'АЕК',
+  'LASK Linz': 'ЛАСК',
+  'Viking FK': 'Викинг',
+  'ŠK Slovan Bratislava': 'Слован Братислава',
+  'FK Bodø/Glimt': 'Будё-Глимт',
+  'Como 1907': 'Комо',
+  'RB Leipzig': 'РБ Лейпциг',
+  'Sabah FK': 'Сабах',
+};
+
+function mapStage(apiStage) {
+  const stages = {
+    'PRELIMINARY': 'Предварительный раунд',
+    'FIRST_QUALIFYING_ROUND': '1-й квал. раунд',
+    'SECOND_QUALIFYING_ROUND': '2-й квал. раунд',
+    'THIRD_QUALIFYING_ROUND': '3-й квал. раунд',
+    'PLAY_OFF_ROUND': 'Раунд плей-офф',
+    'GROUP_STAGE': 'Групповой этап',
+    'ROUND_OF_16': '1/8 финала',
+    'QUARTER_FINALS': '1/4 финала',
+    'SEMI_FINALS': 'Полуфинал',
+    'FINAL': 'Финал',
+  };
+  return stages[apiStage] || apiStage;
+}
+
+async function fetchUCLMatches() {
+  if (!FOOTBALL_DATA_API_KEY) {
+    throw new Error('FOOTBALL_DATA_API_KEY не задан');
+  }
+  const season = '2026';
+  const url = `${FOOTBALL_DATA_BASE_URL}/competitions/CL/matches?season=${season}`;
+  const response = await fetch(url, {
+    headers: { 'X-Auth-Token': FOOTBALL_DATA_API_KEY },
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Football-Data.org API error: ${response.status} ${text}`);
+  }
+  const data = await response.json();
+  const matches = data.matches || [];
+  const existingMatches = filterHeader(await getSheetData('Matches', 'A:Z'), 'match_id');
+  const existingIds = new Set(existingMatches.map(row => row[0]));
+
+  const newRows = [];
+
+  for (const match of matches) {
+    const matchId = String(match.id);
+    if (existingIds.has(matchId)) continue;
+
+    let homeTeam = match.homeTeam?.name || 'Unknown';
+    let awayTeam = match.awayTeam?.name || 'Unknown';
+    if (teamTranslations[homeTeam]) homeTeam = teamTranslations[homeTeam];
+    if (teamTranslations[awayTeam]) awayTeam = teamTranslations[awayTeam];
+
+    const kickoffUtc = match.utcDate || '';
+    const status = mapStatus(match.status);
+    const stage = mapStage(match.stage);
+
+    let homeScore = '';
+    let awayScore = '';
+    let resultUpdatedAt = '';
+    if (status === 'finished' && match.score && match.score.fullTime) {
+      homeScore = match.score.fullTime.home;
+      awayScore = match.score.fullTime.away;
+      resultUpdatedAt = new Date().toISOString();
     }
-    matches.forEach(match => {
-      const card = document.createElement('div');
-      card.className = 'match-card';
-      const kickoff = new Date(match.kickoff_utc).toLocaleString();
-      let statusText = match.status === 'scheduled' ? 'Предстоит' : match.status;
-      let predIcon = '';
-      if (match.user_has_predicted) {
-        predIcon = ' ✅';
+
+    newRows.push([
+      matchId,
+      stage,
+      homeTeam,
+      awayTeam,
+      kickoffUtc,
+      status,
+      homeScore,
+      awayScore,
+      resultUpdatedAt,
+      'FALSE'
+    ]);
+    existingIds.add(matchId);
+  }
+
+  await appendRows('Matches', newRows);
+  return newRows.length;
+}
+
+async function updateFinishedMatches() {
+  if (!FOOTBALL_DATA_API_KEY) {
+    throw new Error('FOOTBALL_DATA_API_KEY не задан');
+  }
+  const season = '2026';
+  const url = `${FOOTBALL_DATA_BASE_URL}/competitions/CL/matches?season=${season}`;
+  const response = await fetch(url, {
+    headers: { 'X-Auth-Token': FOOTBALL_DATA_API_KEY },
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Football-Data.org API error: ${response.status} ${text}`);
+  }
+  const data = await response.json();
+  const apiMatches = data.matches || [];
+
+  const sheetMatches = await getSheetData('Matches', 'A:I');
+  const matchRows = filterHeader(sheetMatches, 'match_id');
+
+  for (const apiMatch of apiMatches) {
+    if (apiMatch.status !== 'FINISHED') continue;
+
+    const matchId = String(apiMatch.id);
+    const sheetIndex = matchRows.findIndex(row => row[0] === matchId);
+    if (sheetIndex === -1) continue;
+
+    const currentRow = matchRows[sheetIndex];
+    const scoreLocked = currentRow[8] === 'TRUE';
+
+    if (scoreLocked) continue;
+
+    const homeScore = apiMatch.score?.fullTime?.home;
+    const awayScore = apiMatch.score?.fullTime?.away;
+    if (homeScore === undefined || awayScore === undefined) continue;
+
+    const currentHome = currentRow[6];
+    const currentAway = currentRow[7];
+    if (currentHome === String(homeScore) && currentAway === String(awayScore)) {
+      continue;
+    }
+
+    const updatedRow = [...currentRow];
+    updatedRow[5] = 'finished';
+    updatedRow[6] = homeScore;
+    updatedRow[7] = awayScore;
+    updatedRow[8] = new Date().toISOString();
+
+    const actualRowIndex = sheetMatches.findIndex(row => row[0] === matchId);
+    if (actualRowIndex === -1) continue;
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `Matches!A${actualRowIndex + 1}:I${actualRowIndex + 1}`,
+      valueInputOption: 'USER_ENTERED',
+      resource: { values: [updatedRow] },
+    });
+
+    await recalculatePointsForMatch(matchId, homeScore, awayScore);
+  }
+  return true;
+}
+
+async function fetchMatchEvents(matchId) {
+  if (!FOOTBALL_DATA_API_KEY) {
+    throw new Error('FOOTBALL_DATA_API_KEY не задан');
+  }
+  const url = `${FOOTBALL_DATA_BASE_URL}/matches/${matchId}/events`;
+  const response = await fetch(url, {
+    headers: { 'X-Auth-Token': FOOTBALL_DATA_API_KEY },
+  });
+  if (!response.ok) {
+    return [];
+  }
+  const data = await response.json();
+  return data.events || [];
+}
+
+async function updateMatchEventsForFinished() {
+  const finishedMatches = filterHeader(await getSheetData('Matches', 'A:I'), 'match_id')
+    .filter(row => row[5] === 'finished');
+
+  const existingEvents = filterHeader(await getSheetData('MatchEvents', 'A:G'), 'match_id');
+  const existingMatchIds = new Set(existingEvents.map(row => row[0]));
+
+  const matchesToProcess = finishedMatches
+    .filter(match => !existingMatchIds.has(match[0]))
+    .slice(0, 8);
+
+  for (const match of matchesToProcess) {
+    const matchId = match[0];
+    try {
+      const events = await fetchMatchEvents(matchId);
+      if (events && events.length > 0) {
+        const rows = [];
+        for (const ev of events) {
+          if (ev.type !== 'GOAL') continue;
+          const team = ev.team?.name || '';
+          const minute = ev.minute || 0;
+          const addedTime = ev.injuryTime || 0;
+          const player = ev.player?.name || '';
+          rows.push([matchId, 'goal', team, minute, addedTime, '', player]);
+        }
+        if (rows.length > 0) {
+          await appendRows('MatchEvents', rows);
+        }
       }
-      card.innerHTML = `
-        <strong>${match.home_team} vs ${match.away_team}${predIcon}</strong><br>
-        Дата: ${kickoff}<br>
-        Статус: ${statusText}
-        ${match.status === 'finished' ? `<br>Счёт: ${match.home_score} - ${match.away_score}` : ''}
-        ${match.user_prediction ? `<br>Ваш прогноз: ${match.user_prediction.home} - ${match.user_prediction.away}` : ''}
-      `;
-      if (match.status === 'scheduled') {
-        const btn = document.createElement('button');
-        btn.className = 'btn-predict';
-        btn.textContent = match.user_has_predicted ? 'Изменить прогноз' : 'Сделать прогноз';
-        btn.onclick = () => showPredictionModal(match);
-        card.appendChild(btn);
-      }
-      const allBtn = document.createElement('button');
-      allBtn.className = 'btn-all-predictions';
-      allBtn.textContent = 'Прогнозы';
-      allBtn.onclick = () => showAllPredictions(match);
-      card.appendChild(allBtn);
+    } catch (err) {
+      console.error(`Ошибка получения событий для матча ${matchId}:`, err.message);
+    }
 
-      app.appendChild(card);
-    });
-  } catch (e) {
-    console.error(e);
-    document.getElementById('app').innerHTML = '<p>Ошибка загрузки матчей.</p>';
+    if (match !== matchesToProcess[matchesToProcess.length - 1]) {
+      await new Promise(resolve => setTimeout(resolve, 7000));
+    }
+  }
+  return matchesToProcess.length;
+}
+
+async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
+  const predictions = filterHeader(await getSheetData('Predictions', 'A:Z'), 'prediction_id');
+  const matchPredictions = predictions.filter(row => row[2] === matchId);
+
+  for (const pred of matchPredictions) {
+    const predHome = Number(pred[3]);
+    const predAway = Number(pred[4]);
+    const { points, type } = calculatePoints(predHome, predAway, homeScore, awayScore);
+
+    const updatedPred = [pred[0], pred[1], pred[2], pred[3], pred[4], pred[5], pred[6], points, type];
+    await updateRow('Predictions', 0, pred[0], updatedPred);
+
+    const userId = pred[1];
+    const users = filterHeader(await getSheetData('Users', 'A:Z'), 'user_id');
+    const userIndex = users.findIndex(row => row[0] === String(userId));
+    if (userIndex === -1) continue;
+    const allUsers = await getSheetData('Users', 'A:Z');
+    const user = [...allUsers[userIndex + 1]];
+    user[4] = Number(user[4]) + points;
+    if (points > 0) user[6] = Number(user[6]) + 1;
+    if (type === 'exact') user[7] = Number(user[7]) + 1;
+    if (type === 'difference') user[8] = Number(user[8]) + 1;
+    if (type === 'draw') user[9] = Number(user[9]) + 1;
+    if (type === 'outcome') user[10] = Number(user[10]) + 1;
+    if (type === 'miss') user[11] = Number(user[11]) + 1;
+    await updateRow('Users', 0, userId, user);
   }
 }
 
-function showPredictionModal(match) {
-  const existing = document.querySelector('.modal-overlay');
-  if (existing) existing.remove();
+app.post('/api/auth', async (req, res) => {
+  const initDataString = req.body.initData;
+  if (!initDataString) {
+    return res.status(400).json({ error: 'initData required' });
+  }
+  const params = new URLSearchParams(initDataString);
+  const user = JSON.parse(params.get('user'));
+  const userId = user.id;
 
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.style.cssText = 'position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:1000;';
-  overlay.innerHTML = `
-    <div style="background:white; padding:20px; border-radius:12px; width:90%; max-width:350px;">
-      <h3>Прогноз на матч</h3>
-      <p>${match.home_team} vs ${match.away_team}</p>
-      <div style="display:flex; justify-content:space-around; align-items:center;">
-        <label>Голы ${match.home_team}: <input type="number" id="homeGoals" min="0" max="20" value="0"></label>
-        <label>Голы ${match.away_team}: <input type="number" id="awayGoals" min="0" max="20" value="0"></label>
-      </div>
-      <button id="save-prediction" style="margin-top:15px; width:100%; padding:10px; background:#34c759; color:white; border:none; border-radius:8px;">Сохранить</button>
-      <button id="cancel-prediction" style="margin-top:5px; width:100%; padding:10px; background:#999; color:white; border:none; border-radius:8px;">Отмена</button>
-    </div>
-  `;
-  document.body.appendChild(overlay);
+  const users = filterHeader(await getSheetData('Users', 'A:Z'), 'user_id');
+  const existing = users.find(row => row[0] === String(userId));
+  if (!existing) {
+    let displayName = user.first_name || user.username || 'User';
+    if (user.last_name && user.first_name) {
+      displayName = `${user.first_name} ${user.last_name}`;
+    }
+    await appendRows('Users', [[
+      userId,
+      user.username || '',
+      displayName,
+      new Date().toISOString(),
+      0, 0, 0, 0, 0, 0, 0, 0
+    ]]);
+    return res.json({ userId, displayName });
+  } else {
+    return res.json({ userId, displayName: existing[2] });
+  }
+});
 
-  document.getElementById('save-prediction').onclick = () => submitPrediction(match.match_id, overlay);
-  document.getElementById('cancel-prediction').onclick = () => overlay.remove();
-}
+app.get('/api/matches', async (req, res) => {
+  const userId = req.query.userId;
+  const matches = filterHeader(await getSheetData('Matches', 'A:I'), 'match_id');
+  let userPredictions = [];
+  if (userId) {
+    const predictions = filterHeader(await getSheetData('Predictions', 'A:Z'), 'prediction_id');
+    userPredictions = predictions.filter(row => row[1] === String(userId));
+  }
 
-async function submitPrediction(matchId, overlay) {
-  const homeGoals = document.getElementById('homeGoals').value;
-  const awayGoals = document.getElementById('awayGoals').value;
+  const result = matches.map(row => {
+    const matchId = row[0];
+    const userPred = userPredictions.find(p => p[2] === matchId);
+    return {
+      match_id: matchId,
+      stage: row[1],
+      home_team: row[2],
+      away_team: row[3],
+      kickoff_utc: row[4],
+      status: row[5],
+      home_score: row[6],
+      away_score: row[7],
+      user_has_predicted: !!userPred,
+      user_prediction: userPred ? { home: Number(userPred[3]), away: Number(userPred[4]) } : null,
+    };
+  });
+  res.json(result);
+});
+
+app.post('/api/predictions', async (req, res) => {
+  const userId = extractUserId(req);
+  const { matchId, predictedHome, predictedAway } = req.body;
+  if (!userId || !matchId || predictedHome === undefined || predictedAway === undefined) {
+    return res.status(400).json({ error: 'Missing parameters' });
+  }
+  const matches = filterHeader(await getSheetData('Matches', 'A:I'), 'match_id');
+  const match = matches.find(row => row[0] === matchId);
+  if (!match) return res.status(404).json({ error: 'Match not found' });
+  const kickoff = new Date(match[4]);
+  if (Date.now() >= kickoff.getTime()) {
+    return res.status(400).json({ error: 'Match already started' });
+  }
+  const pHome = Number(predictedHome);
+  const pAway = Number(predictedAway);
+  if (isNaN(pHome) || isNaN(pAway) || pHome < 0 || pAway < 0 || pHome > 20 || pAway > 20) {
+    return res.status(400).json({ error: 'Invalid score' });
+  }
+  const predictions = filterHeader(await getSheetData('Predictions', 'A:Z'), 'prediction_id');
+  const existingIndex = predictions.findIndex(row => row[1] === String(userId) && row[2] === matchId);
+  if (existingIndex !== -1) {
+    const row = predictions[existingIndex];
+    const updatedRow = [row[0], userId, matchId, pHome, pAway, row[5], new Date().toISOString(), 0, ''];
+    await updateRow('Predictions', 0, row[0], updatedRow);
+  } else {
+    const predictionId = `${userId}_${matchId}`;
+    await appendRows('Predictions', [[
+      predictionId,
+      userId,
+      matchId,
+      pHome,
+      pAway,
+      new Date().toISOString(),
+      new Date().toISOString(),
+      0,
+      ''
+    ]]);
+  }
+  res.json({ success: true });
+});
+
+app.post('/api/admin/match-result', async (req, res) => {
+  const userId = extractUserId(req);
+  const adminIds = process.env.ADMIN_USER_IDS.split(',').map(Number);
+  if (!adminIds.includes(Number(userId))) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  const { matchId, homeScore, awayScore } = req.body;
+  if (!matchId || homeScore === undefined || awayScore === undefined) {
+    return res.status(400).json({ error: 'Missing parameters' });
+  }
+  const hScore = Number(homeScore);
+  const aScore = Number(awayScore);
+  if (isNaN(hScore) || isNaN(aScore) || hScore < 0 || aScore < 0 || hScore > 20 || aScore > 20) {
+    return res.status(400).json({ error: 'Invalid score' });
+  }
+  const matches = filterHeader(await getSheetData('Matches', 'A:I'), 'match_id');
+  const matchIndex = matches.findIndex(row => row[0] === matchId);
+  if (matchIndex === -1) return res.status(404).json({ error: 'Match not found' });
+  const allMatches = await getSheetData('Matches', 'A:I');
+  const updatedMatch = [...allMatches[matchIndex + 1]];
+  updatedMatch[5] = 'finished';
+  updatedMatch[6] = hScore;
+  updatedMatch[7] = aScore;
+  updatedMatch[8] = new Date().toISOString();
+  updatedMatch[8] = 'TRUE';
+  await updateRow('Matches', 0, matchId, updatedMatch);
+
+  await recalculatePointsForMatch(matchId, hScore, aScore);
+  res.json({ success: true, processed: true });
+});
+
+app.get('/api/match-predictions/:matchId', async (req, res) => {
+  const { matchId } = req.params;
+  const predictions = filterHeader(await getSheetData('Predictions', 'A:Z'), 'prediction_id');
+  const matchPreds = predictions.filter(row => row[2] === matchId);
+
+  const users = filterHeader(await getSheetData('Users', 'A:Z'), 'user_id');
+  const userMap = new Map(users.map(u => [u[0], u[2] || u[1] || u[0]]));
+
+  const result = matchPreds.map(p => ({
+    userId: p[1],
+    displayName: userMap.get(p[1]) || p[1],
+    predictedHome: Number(p[3]),
+    predictedAway: Number(p[4]),
+    points: Number(p[7]),
+    predictionType: p[8] || '',
+  }));
+
+  res.json(result);
+});
+
+app.get('/api/match-events/:matchId', async (req, res) => {
+  const { matchId } = req.params;
+  const events = filterHeader(await getSheetData('MatchEvents', 'A:G'), 'match_id');
+  const matchEvents = events.filter(row => row[0] === matchId);
+  const result = matchEvents.map(e => ({
+    matchId: e[0],
+    eventType: e[1],
+    team: e[2],
+    minute: Number(e[3]),
+    addedTime: e[4] ? Number(e[4]) : 0,
+    scoreAfterEvent: e[5],
+    player: e[6] || '',
+  }));
+  res.json(result);
+});
+
+app.get('/api/standings', async (req, res) => {
+  const users = filterHeader(await getSheetData('Users', 'A:Z'), 'user_id');
+  const table = users.map(row => ({
+    userId: row[0],
+    username: row[1],
+    displayName: row[2],
+    registrationDate: row[3],
+    totalPoints: Number(row[4]),
+    successfulPredictions: Number(row[6]),
+    exactScores: Number(row[7]),
+    goalDifference: Number(row[8]),
+    draws: Number(row[9]),
+    outcomes: Number(row[10]),
+    misses: Number(row[11]),
+  }));
+  table.sort((a, b) => {
+    if (b.totalPoints !== a.totalPoints) return b.totalPoints - a.totalPoints;
+    if (b.successfulPredictions !== a.successfulPredictions) return b.successfulPredictions - a.successfulPredictions;
+    if (b.exactScores !== a.exactScores) return b.exactScores - a.exactScores;
+    if (b.goalDifference !== a.goalDifference) return b.goalDifference - a.goalDifference;
+    if (b.draws !== a.draws) return b.draws - a.draws;
+    if (b.outcomes !== a.outcomes) return b.outcomes - a.outcomes;
+    return a.userId - b.userId;
+  });
+  table.forEach((row, index) => row.position = index + 1);
+  res.json(table);
+});
+
+app.post('/api/admin/sync-matches', async (req, res) => {
+  const userId = extractUserId(req);
+  const adminIds = process.env.ADMIN_USER_IDS.split(',').map(Number);
+  if (!adminIds.includes(Number(userId))) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
   try {
-    const res = await fetch('/api/predictions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId, matchId, predictedHome: homeGoals, predictedAway: awayGoals })
-    });
-    const data = await res.json();
-    if (data.success) {
-      alert('Прогноз сохранён');
-      overlay.remove();
-      loadMatches();
-    } else {
-      alert(data.error || 'Ошибка');
-    }
-  } catch (e) {
-    console.error(e);
-    alert('Ошибка сети');
+    const count = await fetchUCLMatches();
+    res.json({ success: true, fetched: count });
+  } catch (error) {
+    console.error('Sync error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
-}
+});
 
-async function showAllPredictions(match) {
+app.post('/api/admin/update-results', async (req, res) => {
+  const apiKey = req.headers['x-admin-api-key'] || req.body.apiKey;
+  if (!ADMIN_API_KEY || apiKey !== ADMIN_API_KEY) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
   try {
-    const res = await fetch(`/api/match-predictions/${match.match_id}`);
-    const preds = await res.json();
-
-    // Загружаем события голов
-    let events = [];
-    if (match.status === 'finished' || match.status === 'live') {
-      const evRes = await fetch(`/api/match-events/${match.match_id}`);
-      if (evRes.ok) events = await evRes.json();
-    }
-
-    const existing = document.querySelector('.modal-overlay');
-    if (existing) existing.remove();
-
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    overlay.style.cssText = 'position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:1000;';
-
-    const matchTitle = `${match.home_team} vs ${match.away_team}`;
-    const scoreLine = (match.home_score !== undefined && match.away_score !== undefined) ? ` ${match.home_score} - ${match.away_score}` : '';
-
-    let tableHtml = '<table><tr><th>Участник</th><th>Прогноз</th><th>Очки</th></tr>';
-    preds.forEach(p => {
-      tableHtml += `<tr><td>${p.displayName}</td><td>${p.predictedHome} - ${p.predictedAway}</td><td>${p.points}</td></tr>`;
-    });
-    tableHtml += '</table>';
-
-    let eventsHtml = '';
-    if (events.length > 0) {
-      eventsHtml = '<div style="margin-top:15px;"><h4>Голы</h4><ul>';
-      events.forEach(ev => {
-        const minuteLabel = ev.addedTime > 0 ? `${ev.minute}+${ev.addedTime}` : ev.minute;
-        eventsHtml += `<li>${minuteLabel}' — ${ev.team}: ${ev.player} (${ev.scoreAfterEvent})</li>`;
-      });
-      eventsHtml += '</ul></div>';
-    }
-
-    overlay.innerHTML = `
-      <div style="background:white; padding:20px; border-radius:12px; width:90%; max-width:400px;">
-        <h3>${matchTitle}${scoreLine}</h3>
-        ${tableHtml}
-        ${eventsHtml}
-        <button id="close-all" style="margin-top:10px; width:100%; padding:10px; background:#999; color:white; border:none; border-radius:8px;">Закрыть</button>
-      </div>
-    `;
-    document.body.appendChild(overlay);
-    document.getElementById('close-all').onclick = () => overlay.remove();
-  } catch (e) {
-    console.error(e);
-    alert('Ошибка загрузки прогнозов');
+    await updateFinishedMatches();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Update results error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
-}
+});
 
-async function loadStandings() {
+app.post('/api/admin/update-events', async (req, res) => {
+  const apiKey = req.headers['x-admin-api-key'] || req.body.apiKey;
+  if (!ADMIN_API_KEY || apiKey !== ADMIN_API_KEY) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
   try {
-    const res = await fetch('/api/standings');
-    const table = await res.json();
-    const app = document.getElementById('app');
-    app.innerHTML = '<h2>Турнирная таблица</h2>';
-    if (table.length === 0) {
-      app.innerHTML += '<p>Нет участников.</p>';
-      return;
-    }
-    let html = '<table><tr><th>#</th><th>Имя</th><th>Очки</th><th>Точные</th><th>Разницы</th><th>Ничьи</th><th>Исходы</th><th>Промахи</th></tr>';
-    table.forEach(row => {
-      html += `<tr><td>${row.position}</td><td>${row.displayName}</td><td>${row.totalPoints}</td><td>${row.exactScores}</td><td>${row.goalDifference}</td><td>${row.draws}</td><td>${row.outcomes}</td><td>${row.misses}</td></tr>`;
-    });
-    html += '</table>';
-    app.innerHTML = html;
-  } catch (e) {
-    console.error(e);
-    document.getElementById('app').innerHTML = '<p>Ошибка загрузки таблицы.</p>';
+    const processed = await updateMatchEventsForFinished();
+    res.json({ success: true, processed });
+  } catch (error) {
+    console.error('Update events error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
+});
+
+app.post('/api/admin/recalculate-all', async (req, res) => {
+  const apiKey = req.headers['x-admin-api-key'] || req.body.apiKey;
+  if (!ADMIN_API_KEY || apiKey !== ADMIN_API_KEY) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  try {
+    const allMatches = filterHeader(await getSheetData('Matches', 'A:I'), 'match_id');
+    const finishedMatches = allMatches.filter(row => row[5] === 'finished' && row[6] !== '' && row[7] !== '');
+    for (const match of finishedMatches) {
+      const matchId = match[0];
+      const homeScore = Number(match[6]);
+      const awayScore = Number(match[7]);
+      await recalculatePointsForMatch(matchId, homeScore, awayScore);
+    }
+    res.json({ success: true, processed: finishedMatches.length });
+  } catch (error) {
+    console.error('Recalculate all error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+function calculatePoints(predHome, predAway, actHome, actAway) {
+  if (predHome === actHome && predAway === actAway) return { points: 5, type: 'exact' };
+  if (actHome === actAway && predHome === predAway) return { points: 3, type: 'draw' };
+  if ((predHome - predAway) === (actHome - actAway)) return { points: 3, type: 'difference' };
+  if ((predHome > predAway && actHome > actAway) || (predHome < predAway && actHome < actAway)) return { points: 1, type: 'outcome' };
+  return { points: 0, type: 'miss' };
 }
 
-document.getElementById('nav-matches').addEventListener('click', () => { loadMatches(); });
-document.getElementById('nav-standings').addEventListener('click', () => { loadStandings(); });
-
-auth();
+app.listen(process.env.PORT || 3000, () => {
+  console.log(`Server running on port ${process.env.PORT || 3000}`);
+});
