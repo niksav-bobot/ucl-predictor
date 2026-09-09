@@ -63,7 +63,7 @@ async function loadMatches() {
       const allBtn = document.createElement('button');
       allBtn.className = 'btn-all-predictions';
       allBtn.textContent = 'Прогнозы';
-      allBtn.onclick = () => showAllPredictions(match.match_id);
+      allBtn.onclick = () => showAllPredictions(match);
       card.appendChild(allBtn);
 
       app.appendChild(card);
@@ -122,24 +122,49 @@ async function submitPrediction(matchId, overlay) {
   }
 }
 
-async function showAllPredictions(matchId) {
+async function showAllPredictions(match) {
   try {
-    const res = await fetch(`/api/match-predictions/${matchId}`);
+    const res = await fetch(`/api/match-predictions/${match.match_id}`);
     const preds = await res.json();
+
+    // Загружаем события голов
+    let events = [];
+    if (match.status === 'finished' || match.status === 'live') {
+      const evRes = await fetch(`/api/match-events/${match.match_id}`);
+      if (evRes.ok) events = await evRes.json();
+    }
+
     const existing = document.querySelector('.modal-overlay');
     if (existing) existing.remove();
+
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     overlay.style.cssText = 'position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:1000;';
+
+    const matchTitle = `${match.home_team} vs ${match.away_team}`;
+    const scoreLine = (match.home_score !== undefined && match.away_score !== undefined) ? ` ${match.home_score} - ${match.away_score}` : '';
+
     let tableHtml = '<table><tr><th>Участник</th><th>Прогноз</th><th>Очки</th></tr>';
     preds.forEach(p => {
       tableHtml += `<tr><td>${p.displayName}</td><td>${p.predictedHome} - ${p.predictedAway}</td><td>${p.points}</td></tr>`;
     });
     tableHtml += '</table>';
+
+    let eventsHtml = '';
+    if (events.length > 0) {
+      eventsHtml = '<div style="margin-top:15px;"><h4>Голы</h4><ul>';
+      events.forEach(ev => {
+        const minuteLabel = ev.addedTime > 0 ? `${ev.minute}+${ev.addedTime}` : ev.minute;
+        eventsHtml += `<li>${minuteLabel}' — ${ev.team}: ${ev.player} (${ev.scoreAfterEvent})</li>`;
+      });
+      eventsHtml += '</ul></div>';
+    }
+
     overlay.innerHTML = `
       <div style="background:white; padding:20px; border-radius:12px; width:90%; max-width:400px;">
-        <h3>Прогнозы на матч</h3>
+        <h3>${matchTitle}${scoreLine}</h3>
         ${tableHtml}
+        ${eventsHtml}
         <button id="close-all" style="margin-top:10px; width:100%; padding:10px; background:#999; color:white; border:none; border-radius:8px;">Закрыть</button>
       </div>
     `;
