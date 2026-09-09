@@ -163,7 +163,7 @@ const teamTranslations = {
   'Sabah FK': 'Сабах',
 };
 
-// ========== Словарь синонимов и сокращений ==========
+// ========== Словарь синонимов ==========
 const teamSynonyms = {
   'мс': 'Манчестер Сити',
   'ман сити': 'Манчестер Сити',
@@ -253,22 +253,18 @@ const teamSynonyms = {
   'комо': 'Комо',
   'рб лейпциг': 'РБ Лейпциг',
   'сабах': 'Сабах',
-  // Добавьте другие сокращения при необходимости
 };
 
-// Функция нормализации и замены синонимов
 function normalizeTeamName(name) {
   const lower = name.toLowerCase().trim();
   if (teamSynonyms[lower]) {
     return teamSynonyms[lower];
   }
-  // Попробуем найти частичное совпадение: если слово входит в ключ синонима
   for (const [key, value] of Object.entries(teamSynonyms)) {
     if (lower.includes(key) || key.includes(lower)) {
       return value;
     }
   }
-  // Вернём как есть, если не нашли
   return name;
 }
 
@@ -391,6 +387,7 @@ async function updateFinishedMatches() {
       continue;
     }
 
+    const updatedRow = [...currentRow];
     updatedRow[5] = 'finished';
     updatedRow[6] = homeScore;
     updatedRow[7] = awayScore;
@@ -485,6 +482,7 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
     const userIndex = users.findIndex(row => row[0] === String(userId));
     if (userIndex === -1) continue;
     const allUsers = await getSheetData('Users', 'A:Z');
+    const user = [...allUsers[userIndex + 1]];
 
     user[4] = Number(user[4]) - oldPoints;
     if (oldPoints > 0) user[6] = Number(user[6]) - 1;
@@ -550,7 +548,6 @@ async function processTelegramMessage(msg) {
     ]]);
   }
 
-  // Пытаемся распарсить прогноз
   try {
     const parsed = parsePredictionText(text);
     if (!parsed) {
@@ -561,11 +558,9 @@ async function processTelegramMessage(msg) {
       return;
     }
 
-    // Нормализуем названия команд
     const homeNormalized = normalizeTeamName(parsed.home);
     const awayNormalized = normalizeTeamName(parsed.away);
 
-    // Ищем матч в листе Matches
     const matches = filterHeader(await getSheetData('Matches', 'A:J'), 'match_id');
     const match = matches.find(m => {
       const home = (m[2] || '').toLowerCase().trim();
@@ -593,7 +588,6 @@ async function processTelegramMessage(msg) {
       return;
     }
 
-    // Сохраняем прогноз
     const predictions = filterHeader(await getSheetData('Predictions', 'A:Z'), 'prediction_id');
     const existingIndex = predictions.findIndex(row => row[1] === String(userId) && row[2] === matchId);
     if (existingIndex !== -1) {
@@ -630,9 +624,7 @@ async function processTelegramMessage(msg) {
 }
 
 function parsePredictionText(text) {
-  // Убираем возможную команду /predict
   const clean = text.replace(/^\/predict\s+/, '').trim();
-  // Ищем паттерн: Команда1 - Команда2 Счёт
   const match = clean.match(/^(.*?)\s*[-–—]\s*(.*?)\s+(\d+)\s*:\s*(\d+)$/);
   if (!match) return null;
   return {
@@ -644,6 +636,7 @@ function parsePredictionText(text) {
 }
 
 async function startBotPolling() {
+  console.log('Запуск Telegram polling...');
   while (true) {
     try {
       const response = await callTelegram('getUpdates', {
@@ -786,6 +779,7 @@ app.post('/api/admin/match-result', async (req, res) => {
   const matchIndex = matches.findIndex(row => row[0] === matchId);
   if (matchIndex === -1) return res.status(404).json({ error: 'Match not found' });
   const allMatches = await getSheetData('Matches', 'A:J');
+  const updatedMatch = [...allMatches[matchIndex + 1]];
   updatedMatch[5] = 'finished';
   updatedMatch[6] = hScore;
   updatedMatch[7] = aScore;
@@ -913,6 +907,7 @@ app.post('/api/admin/recalculate-all', async (req, res) => {
     const allUsers = await getSheetData('Users', 'A:Z');
     const userRows = filterHeader(allUsers, 'user_id');
     for (let i = 0; i < userRows.length; i++) {
+      const user = [...userRows[i]];
       user[4] = 0;
       user[6] = 0;
       user[7] = 0;
@@ -926,6 +921,7 @@ app.post('/api/admin/recalculate-all', async (req, res) => {
     const allPredictions = await getSheetData('Predictions', 'A:Z');
     const predictionRows = filterHeader(allPredictions, 'prediction_id');
     for (const pred of predictionRows) {
+      const updatedPred = [...pred];
       updatedPred[7] = 0;
       updatedPred[8] = '';
       await updateRow('Predictions', 0, pred[0], updatedPred);
@@ -962,3 +958,4 @@ app.listen(process.env.PORT || 3000, () => {
       console.error('Ошибка в polling цикле:', err);
     });
   }
+});
