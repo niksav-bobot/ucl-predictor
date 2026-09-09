@@ -207,13 +207,22 @@ async function loadMyPredictions() {
         item.className = 'prediction-item';
         const kickoff = new Date(p.kickoff_utc).toLocaleString();
         const statusText = p.status === 'finished' ? `Счёт: ${p.home_score} - ${p.away_score}` : p.status;
-        const pointText = p.points ? `Очки: ${p.points} (${p.prediction_type})` : '';
+
+        let pointText = '';
+        if (p.points) {
+          if (p.prediction_type === 'exact') {
+            pointText = `<br>У тебя ТС 👍<br>Очки: ${p.points}`;
+          } else {
+            pointText = `<br>Очки: ${p.points}`;
+          }
+        }
+
         item.innerHTML = `
           <strong>${p.home_team} vs ${p.away_team}</strong><br>
           Дата: ${kickoff}<br>
           Статус: ${statusText}<br>
           Ваш прогноз: ${p.predicted_home} - ${p.predicted_away}
-          ${pointText ? `<br>${pointText}` : ''}
+          ${pointText}
         `;
         list.appendChild(item);
       });
