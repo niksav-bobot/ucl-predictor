@@ -62,6 +62,16 @@ async function updateRow(sheetName, idColumnIndex, idValue, newValues) {
   return true;
 }
 
+async function deleteRow(sheetName, idValue) {
+  const data = await getSheetData(sheetName, 'A:Z');
+  const rowIndex = data.findIndex(row => row[0] === String(idValue));
+  if (rowIndex === -1) return;
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: SHEET_ID,
+    range: `${sheetName}!A${rowIndex + 1}:Z${rowIndex + 1}`,
+  });
+}
+
 function extractUserId(req) {
   if (req.body.initData) {
     const params = new URLSearchParams(req.body.initData);
@@ -471,9 +481,6 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
     const predAway = Number(pred[4]);
     const { points, type } = calculatePoints(predHome, predAway, homeScore, awayScore);
 
-    const oldPoints = Number(pred[7]);
-    const oldType = pred[8] || '';
-
     const updatedPred = [pred[0], pred[1], pred[2], pred[3], pred[4], pred[5], pred[6], points, type];
     await updateRow('Predictions', 0, pred[0], updatedPred);
 
@@ -483,14 +490,6 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
     if (userIndex === -1) continue;
     const allUsers = await getSheetData('Users', 'A:Z');
     const user = [...allUsers[userIndex + 1]];
-
-    user[4] = Number(user[4]) - oldPoints;
-    if (oldPoints > 0) user[6] = Number(user[6]) - 1;
-    if (oldType === 'exact') user[7] = Number(user[7]) - 1;
-    if (oldType === 'difference') user[8] = Number(user[8]) - 1;
-    if (oldType === 'draw') user[9] = Number(user[9]) - 1;
-    if (oldType === 'outcome') user[10] = Number(user[10]) - 1;
-    if (oldType === 'miss') user[11] = Number(user[11]) - 1;
 
     user[4] = Number(user[4]) + points;
     if (points > 0) user[6] = Number(user[6]) + 1;
@@ -504,7 +503,7 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
   }
 }
 
-// ========== Telegram Long Polling (только успешные ответы) ==========
+// ========== Telegram Long Polling ==========
 let telegramOffset = 0;
 
 async function callTelegram(method, params) {
@@ -531,7 +530,7 @@ async function processTelegramMessage(msg) {
   const userId = from.id;
   const username = from.username || '';
 
-  // Регистрируем пользователя, если его нет
+  // Регистрируем пользователя
   const users = filterHeader(await getSheetData('Users', 'A:Z'), 'user_id');
   const existingUser = users.find(row => row[0] === String(userId));
   if (!existingUser) {
@@ -548,43 +547,43 @@ async function processTelegramMessage(msg) {
     ]]);
   }
 
-  const parsed = parsePredictionText(text);
-  if (!parsed) {
-    return; // молчим
-  }
+  const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  if (lines.length === 0) return;
 
-  const homeNormalized = normalizeTeamName(parsed.home);
-  const awayNormalized = normalizeTeamName(parsed.away);
+  let savedCount = 0;
 
-  const matches = filterHeader(await getSheetData('Matches', 'A:J'), 'match_id');
-  const match = matches.find(m => {
-    const home = (m[2] || '').toLowerCase().trim();
-    const away = (m[3] || '').toLowerCase().trim();
-    return home === homeNormalized.toLowerCase() &&
-           away === awayNormalized.toLowerCase();
-  });
+  for (const line of lines) {
+    const parsed = parsePredictionText(line);
+    if (!parsed) continue;
 
-  if (!match) {
-    return; // молчим
-  }
+    const homeNormalized = normalizeTeamName(parsed.home);
+    const awayNormalized = normalizeTeamName(parsed.away);
 
-  const matchId = match[0];
-  const status = match[5];
-  const kickoff = new Date(match[4]);
-  if (status !== 'scheduled' || Date.now() >= kickoff.getTime()) {
-    return; // молчим
-  }
+    const matches = filterHeader(await getSheetData('Matches', 'A:J'), 'match_id');
+    const match = matches.find(m => {
+      const home = (m[2] || '').toLowerCase().trim();
+      const away = (m[3] || '').toLowerCase().trim();
+      return home === homeNormalized.toLowerCase() &&
+             away === awayNormalized.toLowerCase();
+    });
 
-  const predictions = filterHeader(await getSheetData('Predictions', 'A:Z'), 'prediction_id');
-  const existingIndex = predictions.findIndex(row => row[1] === String(userId) && row[2] === matchId);
-  if (existingIndex !== -1) {
-    const row = predictions[existingIndex];
-    const updatedRow = [row[0], userId, matchId, parsed.homeScore, parsed.awayScore, row[5], new Date().toISOString(), 0, ''];
-    await updateRow('Predictions', 0, row[0], updatedRow);
-  } else {
-    const predictionId = `${userId}_${matchId}`;
+    if (!match) continue;
+
+    const matchId = match[0];
+    const status = match[5];
+    const kickoff = new Date(match[4]);
+    if (status !== 'scheduled' || Date.now() >= kickoff.getTime()) continue;
+
+    // Удаляем старые записи
+    const predictions = filterHeader(await getSheetData('Predictions', 'A:Z'), 'prediction_id');
+    const existingRows = predictions.filter(row => row[1] === String(userId) && row[2] === matchId);
+    for (const row of existingRows) {
+      await deleteRow('Predictions', row[0]);
+    }
+
+    // Добавляем новую
     await appendRows('Predictions', [[
-      predictionId,
+      `${userId}_${matchId}`,
       userId,
       matchId,
       parsed.homeScore,
@@ -594,12 +593,15 @@ async function processTelegramMessage(msg) {
       0,
       ''
     ]]);
+    savedCount++;
   }
 
-  await callTelegram('sendMessage', {
-    chat_id: chatId,
-    text: `✅ Прогноз сохранён: ${match[2]} ${parsed.homeScore}:${parsed.awayScore} ${match[3]}`
-  });
+  if (savedCount > 0) {
+    await callTelegram('sendMessage', {
+      chat_id: chatId,
+      text: `✅ Сохранено прогнозов: ${savedCount}`
+    });
+  }
 }
 
 function parsePredictionText(text) {
@@ -716,26 +718,27 @@ app.post('/api/predictions', async (req, res) => {
   if (isNaN(pHome) || isNaN(pAway) || pHome < 0 || pAway < 0 || pHome > 20 || pAway > 20) {
     return res.status(400).json({ error: 'Invalid score' });
   }
+
+  // Удаляем все предыдущие записи для этого пользователя и матча
   const predictions = filterHeader(await getSheetData('Predictions', 'A:Z'), 'prediction_id');
-  const existingIndex = predictions.findIndex(row => row[1] === String(userId) && row[2] === matchId);
-  if (existingIndex !== -1) {
-    const row = predictions[existingIndex];
-    const updatedRow = [row[0], userId, matchId, pHome, pAway, row[5], new Date().toISOString(), 0, ''];
-    await updateRow('Predictions', 0, row[0], updatedRow);
-  } else {
-    const predictionId = `${userId}_${matchId}`;
-    await appendRows('Predictions', [[
-      predictionId,
-      userId,
-      matchId,
-      pHome,
-      pAway,
-      new Date().toISOString(),
-      new Date().toISOString(),
-      0,
-      ''
-    ]]);
+  const existingRows = predictions.filter(row => row[1] === String(userId) && row[2] === matchId);
+  for (const row of existingRows) {
+    await deleteRow('Predictions', row[0]);
   }
+
+  // Добавляем новую
+  await appendRows('Predictions', [[
+    `${userId}_${matchId}`,
+    userId,
+    matchId,
+    pHome,
+    pAway,
+    new Date().toISOString(),
+    new Date().toISOString(),
+    0,
+    ''
+  ]]);
+
   res.json({ success: true });
 });
 
