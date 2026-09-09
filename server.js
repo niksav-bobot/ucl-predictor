@@ -1,4 +1,4 @@
-require('dotenv').config();
+... require('dotenv').config();
 const express = require('express');
 const { google } = require('googleapis');
 const crypto = require('crypto');
@@ -21,6 +21,8 @@ const SHEET_ID = process.env.GOOGLE_SHEET_ID;
 const FOOTBALL_DATA_API_KEY = process.env.FOOTBALL_DATA_API_KEY;
 const FOOTBALL_DATA_BASE_URL = 'https://api.football-data.org/v4';
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const TELEGRAM_API_BASE = 'https://api.telegram.org';
 
 // ========== Вспомогательные функции ==========
 async function getSheetData(sheetName, range) {
@@ -160,6 +162,115 @@ const teamTranslations = {
   'RB Leipzig': 'РБ Лейпциг',
   'Sabah FK': 'Сабах',
 };
+
+// ========== Словарь синонимов и сокращений ==========
+const teamSynonyms = {
+  'мс': 'Манчестер Сити',
+  'ман сити': 'Манчестер Сити',
+  'мю': 'Манчестер Юнайтед',
+  'ман юнайтед': 'Манчестер Юнайтед',
+  'манчестер юнайтед': 'Манчестер Юнайтед',
+  'реал': 'Реал Мадрид',
+  'реал мадрид': 'Реал Мадрид',
+  'барса': 'Барселона',
+  'барселона': 'Барселона',
+  'бавария': 'Бавария',
+  'бавария мюнхен': 'Бавария',
+  'дортмунд': 'Боруссия Дортмунд',
+  'боруссия д': 'Боруссия Дортмунд',
+  'боруссия дортмунд': 'Боруссия Дортмунд',
+  'атлетико': 'Атлетико Мадрид',
+  'атлетико мадрид': 'Атлетико Мадрид',
+  'интер': 'Интер',
+  'наполи': 'Наполи',
+  'псж': 'ПСЖ',
+  'пари сен-жермен': 'ПСЖ',
+  'париж': 'ПСЖ',
+  'ливерпуль': 'Ливерпуль',
+  'челси': 'Челси',
+  'арсенал': 'Арсенал',
+  'ювентус': 'Ювентус',
+  'милан': 'Милан',
+  'аякс': 'Аякс',
+  'порту': 'Порту',
+  'бенфика': 'Бенфика',
+  'лион': 'Лион',
+  'монако': 'Монако',
+  'зальцбург': 'Зальцбург',
+  'шахтер': 'Шахтер',
+  'динамо загреб': 'Динамо Загреб',
+  'селтик': 'Селтик',
+  'рейнджерс': 'Рейнджерс',
+  'брюгге': 'Брюгге',
+  'галатасарай': 'Галатасарай',
+  'фенербахче': 'Фенербахче',
+  'олимпиакос': 'Олимпиакос',
+  'аек': 'АЕК',
+  'маккаби хайфа': 'Маккаби Хайфа',
+  'копенгаген': 'Копенгаген',
+  'янг бойз': 'Янг Бойз',
+  'црвена звезда': 'Црвена Звезда',
+  'ланс': 'Ланс',
+  'реал сосьедад': 'Реал Сосьедад',
+  'псв': 'ПСВ',
+  'фейеноорд': 'Фейеноорд',
+  'спортинг': 'Спортинг',
+  'спортинг лиссабон': 'Спортинг',
+  'виктория пльзень': 'Виктория Пльзень',
+  'брест': 'Брест',
+  'штутгарт': 'Штутгарт',
+  'астон вилла': 'Астон Вилла',
+  'болонья': 'Болонья',
+  'жирона': 'Жирона',
+  'сельта': 'Сельта',
+  'бетис': 'Бетис',
+  'севилья': 'Севилья',
+  'валенсия': 'Валенсия',
+  'лацио': 'Лацио',
+  'аталанта': 'Аталанта',
+  'рома': 'Рома',
+  'марсель': 'Марсель',
+  'лилль': 'Лилль',
+  'ницца': 'Ницца',
+  'ренн': 'Ренн',
+  'страсбур': 'Страсбур',
+  'нант': 'Нант',
+  'брага': 'Брага',
+  'андерлехт': 'Андерлехт',
+  'генк': 'Генк',
+  'ференцварош': 'Ференцварош',
+  'лудогорец': 'Лудогорец',
+  'карабах': 'Карабах',
+  'спарта прага': 'Спарта Прага',
+  'славия прага': 'Славия Прага',
+  'базель': 'Базель',
+  'грассхоппер': 'Грассхоппер',
+  'вильярреал': 'Вильярреал',
+  'ласк': 'ЛАСК',
+  'викинг': 'Викинг',
+  'слован братислава': 'Слован Братислава',
+  'будё-глимт': 'Будё-Глимт',
+  'комо': 'Комо',
+  'рб лейпциг': 'РБ Лейпциг',
+  'сабах': 'Сабах',
+  // Добавьте другие сокращения при необходимости
+};
+
+// Функция нормализации и замены синонимов
+function normalizeTeamName(name) {
+  const lower = name.toLowerCase().trim();
+  if (teamSynonyms[lower]) {
+    return teamSynonyms[lower];
+  }
+  // Попробуем найти частичное совпадение: если слово входит в ключ синонима
+  for (const [key, value] of Object.entries(teamSynonyms)) {
+    if (lower.includes(key) || key.includes(lower)) {
+      return value;
+    }
+  }
+  // Вернём как есть, если не нашли
+  return name;
+}
 
 // ========== Работа с Football-Data.org ==========
 function mapStage(apiStage) {
@@ -322,7 +433,6 @@ async function updateMatchEventsForFinished() {
   const existingEvents = filterHeader(await getSheetData('MatchEvents', 'A:G'), 'match_id');
   const existingMatchIds = new Set(existingEvents.map(row => row[0]));
 
-  // Обрабатываем не более 4 матчей за вызов, чтобы уложиться в 30 секунд
   const matchesToProcess = finishedMatches
     .filter(match => !existingMatchIds.has(match[0]))
     .slice(0, 4);
@@ -349,7 +459,6 @@ async function updateMatchEventsForFinished() {
       console.error(`Ошибка получения событий для матча ${matchId}:`, err.message);
     }
 
-    // Пауза 5 секунд между запросами
     if (match !== matchesToProcess[matchesToProcess.length - 1]) {
       await new Promise(resolve => setTimeout(resolve, 5000));
     }
@@ -366,15 +475,12 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
     const predAway = Number(pred[4]);
     const { points, type } = calculatePoints(predHome, predAway, homeScore, awayScore);
 
-    // Старые очки и тип из листа Predictions
     const oldPoints = Number(pred[7]);
     const oldType = pred[8] || '';
 
-    // Обновляем прогноз
     const updatedPred = [pred[0], pred[1], pred[2], pred[3], pred[4], pred[5], pred[6], points, type];
     await updateRow('Predictions', 0, pred[0], updatedPred);
 
-    // Обновляем статистику пользователя: сначала вычитаем старые очки, затем добавляем новые
     const userId = pred[1];
     const users = filterHeader(await getSheetData('Users', 'A:Z'), 'user_id');
     const userIndex = users.findIndex(row => row[0] === String(userId));
@@ -382,7 +488,6 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
     const allUsers = await getSheetData('Users', 'A:Z');
     const user = [...allUsers[userIndex + 1]];
 
-    // Вычитаем старые показатели
     user[4] = Number(user[4]) - oldPoints;
     if (oldPoints > 0) user[6] = Number(user[6]) - 1;
     if (oldType === 'exact') user[7] = Number(user[7]) - 1;
@@ -391,7 +496,6 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
     if (oldType === 'outcome') user[10] = Number(user[10]) - 1;
     if (oldType === 'miss') user[11] = Number(user[11]) - 1;
 
-    // Добавляем новые показатели
     user[4] = Number(user[4]) + points;
     if (points > 0) user[6] = Number(user[6]) + 1;
     if (type === 'exact') user[7] = Number(user[7]) + 1;
@@ -404,14 +508,175 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
   }
 }
 
-// ========== Маршруты API ==========
+// ========== Telegram Long Polling ==========
+let telegramOffset = 0;
 
+async function callTelegram(method, params) {
+  const url = `${TELEGRAM_API_BASE}/bot${BOT_TOKEN}/${method}`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Telegram API error: ${response.status} ${text}`);
+  }
+  return response.json();
+}
+
+async function processTelegramMessage(msg) {
+  const chatId = msg.chat?.id;
+  const from = msg.from;
+  const text = msg.text || '';
+
+  if (!text || !from) return;
+
+  const userId = from.id;
+  const username = from.username || '';
+
+  // Регистрируем пользователя, если его нет
+  const users = filterHeader(await getSheetData('Users', 'A:Z'), 'user_id');
+  const existingUser = users.find(row => row[0] === String(userId));
+  if (!existingUser) {
+    let displayName = from.first_name || username || 'User';
+    if (from.last_name && from.first_name) {
+      displayName = `${from.first_name} ${from.last_name}`;
+    }
+    await appendRows('Users', [[
+      userId,
+      username,
+      displayName,
+      new Date().toISOString(),
+      0, 0, 0, 0, 0, 0, 0, 0
+    ]]);
+  }
+
+  // Пытаемся распарсить прогноз
+  try {
+    const parsed = parsePredictionText(text);
+    if (!parsed) {
+      await callTelegram('sendMessage', {
+        chat_id: chatId,
+        text: 'Не удалось распознать матч и счёт. Используйте формат: "Команда1 - Команда2 Счёт" или /predict Команда1 - Команда2 Счёт.'
+      });
+      return;
+    }
+
+    // Нормализуем названия команд
+    const homeNormalized = normalizeTeamName(parsed.home);
+    const awayNormalized = normalizeTeamName(parsed.away);
+
+    // Ищем матч в листе Matches
+    const matches = filterHeader(await getSheetData('Matches', 'A:J'), 'match_id');
+    const match = matches.find(m => {
+      const home = (m[2] || '').toLowerCase().trim();
+      const away = (m[3] || '').toLowerCase().trim();
+      return home === homeNormalized.toLowerCase() &&
+             away === awayNormalized.toLowerCase();
+    });
+
+    if (!match) {
+      await callTelegram('sendMessage', {
+        chat_id: chatId,
+        text: `Матч "${parsed.home} - ${parsed.away}" не найден. Проверьте названия команд.`
+      });
+      return;
+    }
+
+    const matchId = match[0];
+    const status = match[5];
+    const kickoff = new Date(match[4]);
+    if (status !== 'scheduled' || Date.now() >= kickoff.getTime()) {
+      await callTelegram('sendMessage', {
+        chat_id: chatId,
+        text: `Матч уже начался или завершён, прогнозы не принимаются.`
+      });
+      return;
+    }
+
+    // Сохраняем прогноз
+    const predictions = filterHeader(await getSheetData('Predictions', 'A:Z'), 'prediction_id');
+    const existingIndex = predictions.findIndex(row => row[1] === String(userId) && row[2] === matchId);
+    if (existingIndex !== -1) {
+      const row = predictions[existingIndex];
+      const updatedRow = [row[0], userId, matchId, parsed.homeScore, parsed.awayScore, row[5], new Date().toISOString(), 0, ''];
+      await updateRow('Predictions', 0, row[0], updatedRow);
+    } else {
+      const predictionId = `${userId}_${matchId}`;
+      await appendRows('Predictions', [[
+        predictionId,
+        userId,
+        matchId,
+        parsed.homeScore,
+        parsed.awayScore,
+        new Date().toISOString(),
+        new Date().toISOString(),
+        0,
+        ''
+      ]]);
+    }
+
+    await callTelegram('sendMessage', {
+      chat_id: chatId,
+      text: `✅ Прогноз сохранён: ${match[2]} ${parsed.homeScore}:${parsed.awayScore} ${match[3]}`
+    });
+
+  } catch (err) {
+    console.error('Ошибка обработки сообщения:', err);
+    await callTelegram('sendMessage', {
+      chat_id: chatId,
+      text: 'Произошла внутренняя ошибка. Попробуйте позже.'
+    });
+  }
+}
+
+function parsePredictionText(text) {
+  // Убираем возможную команду /predict
+  const clean = text.replace(/^\/predict\s+/, '').trim();
+  // Ищем паттерн: Команда1 - Команда2 Счёт
+  const match = clean.match(/^(.*?)\s*[-–—]\s*(.*?)\s+(\d+)\s*:\s*(\d+)$/);
+  if (!match) return null;
+  return {
+    home: match[1].trim(),
+    away: match[2].trim(),
+    homeScore: Number(match[3]),
+    awayScore: Number(match[4])
+  };
+}
+
+async function startBotPolling() {
+  console.log('Запуск Telegram polling...');
+  while (true) {
+    try {
+      const response = await callTelegram('getUpdates', {
+        offset: telegramOffset,
+        timeout: 30,
+        allowed_updates: ['message']
+      });
+
+      if (response.ok && response.result.length > 0) {
+        for (const update of response.result) {
+          telegramOffset = update.update_id + 1;
+          if (update.message) {
+            await processTelegramMessage(update.message);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Ошибка polling:', err.message);
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+}
+
+// ========== Маршруты API ==========
 app.post('/api/auth', async (req, res) => {
   const initDataString = req.body.initData;
   if (!initDataString) {
     return res.status(400).json({ error: 'initData required' });
   }
-  // Проверка подписи временно отключена
   const params = new URLSearchParams(initDataString);
   const user = JSON.parse(params.get('user'));
   const userId = user.id;
@@ -529,7 +794,7 @@ app.post('/api/admin/match-result', async (req, res) => {
   updatedMatch[6] = hScore;
   updatedMatch[7] = aScore;
   updatedMatch[8] = new Date().toISOString();
-  updatedMatch[9] = 'TRUE'; // блокируем автоперезапись
+  updatedMatch[9] = 'TRUE';
   await updateRow('Matches', 0, matchId, updatedMatch);
 
   await recalculatePointsForMatch(matchId, hScore, aScore);
@@ -649,22 +914,20 @@ app.post('/api/admin/recalculate-all', async (req, res) => {
     return res.status(403).json({ error: 'Forbidden' });
   }
   try {
-    // Шаг 1: Сбрасываем статистику всех пользователей в ноль
     const allUsers = await getSheetData('Users', 'A:Z');
     const userRows = filterHeader(allUsers, 'user_id');
     for (let i = 0; i < userRows.length; i++) {
       const user = [...userRows[i]];
-      user[4] = 0; // total_points
-      user[6] = 0; // successful_predictions
-      user[7] = 0; // exact_scores
-      user[8] = 0; // goal_difference
-      user[9] = 0; // draws
-      user[10] = 0; // outcomes
-      user[11] = 0; // misses
+      user[4] = 0;
+      user[6] = 0;
+      user[7] = 0;
+      user[8] = 0;
+      user[9] = 0;
+      user[10] = 0;
+      user[11] = 0;
       await updateRow('Users', 0, user[0], user);
     }
 
-    // Шаг 2: Сбрасываем очки в листе Predictions
     const allPredictions = await getSheetData('Predictions', 'A:Z');
     const predictionRows = filterHeader(allPredictions, 'prediction_id');
     for (const pred of predictionRows) {
@@ -674,7 +937,6 @@ app.post('/api/admin/recalculate-all', async (req, res) => {
       await updateRow('Predictions', 0, pred[0], updatedPred);
     }
 
-    // Шаг 3: Пересчитываем очки для всех завершённых матчей
     const allMatches = filterHeader(await getSheetData('Matches', 'A:J'), 'match_id');
     const finishedMatches = allMatches.filter(row => row[5] === 'finished' && row[6] !== '' && row[7] !== '');
     for (const match of finishedMatches) {
@@ -701,4 +963,9 @@ function calculatePoints(predHome, predAway, actHome, actAway) {
 
 app.listen(process.env.PORT || 3000, () => {
   console.log(`Server running on port ${process.env.PORT || 3000}`);
-});
+  if (BOT_TOKEN) {
+    startBotPolling().catch(err => {
+      console.error('Ошибка в polling цикле:', err);
+    });
+  }
+}); ...
