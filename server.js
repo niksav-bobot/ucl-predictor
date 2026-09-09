@@ -391,7 +391,6 @@ async function updateFinishedMatches() {
       continue;
     }
 
-    const updatedRow = [...currentRow];
     updatedRow[5] = 'finished';
     updatedRow[6] = homeScore;
     updatedRow[7] = awayScore;
@@ -486,7 +485,6 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
     const userIndex = users.findIndex(row => row[0] === String(userId));
     if (userIndex === -1) continue;
     const allUsers = await getSheetData('Users', 'A:Z');
-    const user = [...allUsers[userIndex + 1]];
 
     user[4] = Number(user[4]) - oldPoints;
     if (oldPoints > 0) user[6] = Number(user[6]) - 1;
@@ -646,7 +644,6 @@ function parsePredictionText(text) {
 }
 
 async function startBotPolling() {
-  console.log('Запуск Telegram polling...');
   while (true) {
     try {
       const response = await callTelegram('getUpdates', {
@@ -789,7 +786,6 @@ app.post('/api/admin/match-result', async (req, res) => {
   const matchIndex = matches.findIndex(row => row[0] === matchId);
   if (matchIndex === -1) return res.status(404).json({ error: 'Match not found' });
   const allMatches = await getSheetData('Matches', 'A:J');
-  const updatedMatch = [...allMatches[matchIndex + 1]];
   updatedMatch[5] = 'finished';
   updatedMatch[6] = hScore;
   updatedMatch[7] = aScore;
@@ -917,7 +913,6 @@ app.post('/api/admin/recalculate-all', async (req, res) => {
     const allUsers = await getSheetData('Users', 'A:Z');
     const userRows = filterHeader(allUsers, 'user_id');
     for (let i = 0; i < userRows.length; i++) {
-      const user = [...userRows[i]];
       user[4] = 0;
       user[6] = 0;
       user[7] = 0;
@@ -931,7 +926,6 @@ app.post('/api/admin/recalculate-all', async (req, res) => {
     const allPredictions = await getSheetData('Predictions', 'A:Z');
     const predictionRows = filterHeader(allPredictions, 'prediction_id');
     for (const pred of predictionRows) {
-      const updatedPred = [...pred];
       updatedPred[7] = 0;
       updatedPred[8] = '';
       await updateRow('Predictions', 0, pred[0], updatedPred);
@@ -968,4 +962,3 @@ app.listen(process.env.PORT || 3000, () => {
       console.error('Ошибка в polling цикле:', err);
     });
   }
-}); ...
