@@ -27,7 +27,7 @@ const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const TELEGRAM_API_BASE = 'https://api.telegram.org';
 
-const SEASON = process.env.FOOTBALL_SEASON || '2025';
+const SEASON = process.env.FOOTBALL_SEASON || '2026';
 const EVENTS_BATCH_SIZE = Number(process.env.EVENTS_BATCH_SIZE || 4);
 const SYNC_INTERVAL_MS = (Number(process.env.SYNC_INTERVAL_MINUTES || 15) * 60 * 1000);
 const AUTO_SYNC = String(process.env.AUTO_SYNC || '').toLowerCase() !== 'false';
