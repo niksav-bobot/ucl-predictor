@@ -3,6 +3,7 @@ tg.ready();
 tg.expand();
 
 const userId = tg.initDataUnsafe?.user?.id;
+const initData = tg.initData;
 
 async function auth() {
   if (!userId) {
@@ -13,7 +14,7 @@ async function auth() {
     const res = await fetch('/api/auth', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ initData: tg.initData })
+      body: JSON.stringify({ initData })
     });
     const data = await res.json();
     if (data.userId) {
@@ -106,7 +107,12 @@ async function submitPrediction(matchId, overlay) {
     const res = await fetch('/api/predictions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId, matchId, predictedHome: homeGoals, predictedAway: awayGoals })
+      body: JSON.stringify({
+        initData,
+        matchId,
+        predictedHome: homeGoals,
+        predictedAway: awayGoals
+      })
     });
     const data = await res.json();
     if (data.success) {
@@ -187,7 +193,6 @@ async function loadMyPredictions() {
       return;
     }
 
-    // Группировка по стадиям
     const grouped = {};
     predictions.forEach(p => {
       const stage = p.stage || 'Другое';
