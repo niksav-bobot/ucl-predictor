@@ -26,7 +26,6 @@ const FOOTBALL_DATA_BASE_URL = 'https://api.football-data.org/v4';
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const TELEGRAM_API_BASE = 'https://api.telegram.org';
-
 const SEASON = process.env.FOOTBALL_SEASON || '2026';
 const EVENTS_BATCH_SIZE = Number(process.env.EVENTS_BATCH_SIZE || 4);
 const SYNC_INTERVAL_MS = (Number(process.env.SYNC_INTERVAL_MINUTES || 15) * 60 * 1000);
@@ -85,7 +84,6 @@ function isDataRow(row, headerValue) {
   if (!Array.isArray(row) || row.length === 0) return false;
 
   const first = row[0];
-
   if (!isNotEmpty(first)) return false;
 
   const firstStr = String(first).trim();
@@ -95,10 +93,6 @@ function isDataRow(row, headerValue) {
   }
 
   return true;
-}
-
-function filterHeader(rows, headerValue) {
-  return rows.filter(row => isDataRow(row, headerValue));
 }
 
 function rangeForRow(sheetName, rowIndex, columns) {
@@ -175,19 +169,6 @@ async function writeRow(sheetName, rowIndex, values) {
   await batchWriteRows(sheetName, [{ rowIndex, values }]);
 }
 
-async function updateRow(sheetName, idColumnIndex, idValue, newValues) {
-  const data = await getSheetData(sheetName, 'A:Z');
-
-  const rowIndex = data.findIndex(row => {
-    return isNotEmpty(row[idColumnIndex]) && String(row[idColumnIndex]).trim() === String(idValue).trim();
-  });
-
-  if (rowIndex === -1) return false;
-
-  await writeRow(sheetName, rowIndex, newValues);
-  return true;
-}
-
 const sheetIdCache = {};
 
 async function getSheetIdByName(sheetName) {
@@ -210,7 +191,6 @@ async function getSheetIdByName(sheetName) {
   return sheetIdCache[sheetName];
 }
 
-// Реальное удаление строки, а не очистка ячеек
 async function deleteRow(sheetName, idValue) {
   const data = await getSheetData(sheetName, 'A:Z');
 
@@ -239,6 +219,149 @@ async function deleteRow(sheetName, idValue) {
       ],
     },
   });
+}
+
+// ========== Дополнительные помощники для последних прогнозов ==========
+function getLatestPredictionMap(predictionsData) {
+  const latest = new Map();
+
+  predictionsData.forEach((row, rowIndex) => {
+    if (!isDataRow(row, 'prediction_id')) return;
+
+    const userId = String(row[1] || '').trim();
+    const matchId = String(row[2] || '').trim();
+
+    if (!userId || !matchId) return;
+
+    const key = `${userId}|${matchId}`;
+
+    const updatedTime =
+      Date.parse(row[6] || '') ||
+      Date.parse(row[5] || '') ||
+      0;
+
+    const current = latest.get(key);
+
+    if (
+      !current ||
+      updatedTime > current.updatedTime ||
+      (updatedTime === current.updatedTime && rowIndex > current.rowIndex)
+    ) {
+      latest.set(key, {
+        rowIndex,
+        updatedTime,
+        userId,
+        matchId,
+      });
+    }
+  });
+
+  return latest;
+}
+
+function getLatestPredictionsForUser(predictionsData, userId) {
+  const latestMap = getLatestPredictionMap(predictionsData);
+  const userIdStr = String(userId || '').trim();
+  const rows = [];
+
+  for (const item of latestMap.values()) {
+    const row = predictionsData[item.rowIndex];
+
+    if (row && String(row[1] || '').trim() === userIdStr) {
+      rows.push(row);
+    }
+  }
+
+  return rows;
+}
+
+async function deleteRowsByRowIndices(sheetName, rowIndexes) {
+  const unique = [...new Set(rowIndexes.map(Number).filter(Number.isFinite))].sort((a, b) => b - a);
+  if (!unique.length) return;
+
+  const sheetId = await getSheetIdByName(sheetName);
+  const chunkSize = 200;
+
+  for (let i = 0; i < unique.length; i += chunkSize) {
+    const chunk = unique.slice(i, i + chunkSize);
+
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SHEET_ID,
+      requestBody: {
+        requests: chunk.map(rowIndex => ({
+          deleteDimension: {
+            range: {
+              sheetId,
+              dimension: 'ROWS',
+              startIndex: rowIndex,
+              endIndex: rowIndex + 1,
+            },
+          },
+        })),
+      },
+    });
+  }
+}
+
+function filterPredictionResponseByType(list, typeFilter) {
+  const type = String(typeFilter || '').toLowerCase().trim();
+
+  if (!type || type === 'all') return list;
+
+  return list.filter(item => {
+    if (type === 'exact') return item.prediction_type === 'exact';
+    if (type === 'difference') return item.prediction_type === 'difference';
+    if (type === 'draw') return item.prediction_type === 'draw';
+    if (type === 'outcome') return item.prediction_type === 'outcome';
+
+    if (type === 'miss') {
+      return item.prediction_type === 'miss' || (item.status === 'finished' && item.points === 0);
+    }
+
+    if (type === 'successful' || type === 'points') {
+      return item.points > 0;
+    }
+
+    if (type === 'finished') return item.status === 'finished';
+    if (type === 'scheduled') return item.status === 'scheduled';
+    if (type === 'live') return item.status === 'live';
+
+    return true;
+  });
+}
+
+function sortPredictionsResponse(list, sortMode) {
+  const byDateAsc = (a, b) => {
+    const dateA = new Date(a.kickoff_utc).getTime() || Infinity;
+    const dateB = new Date(b.kickoff_utc).getTime() || Infinity;
+    return dateA - dateB;
+  };
+
+  const normalizedSort = String(sortMode || '').toLowerCase().trim();
+
+  if (normalizedSort === 'exact_first') {
+    return [...list].sort((a, b) => {
+      const aExact = a.prediction_type === 'exact' ? 1 : 0;
+      const bExact = b.prediction_type === 'exact' ? 1 : 0;
+
+      return bExact - aExact || byDateAsc(a, b);
+    });
+  }
+
+  if (normalizedSort === 'points_desc') {
+    return [...list].sort((a, b) => b.points - a.points || byDateAsc(a, b));
+  }
+
+  if (normalizedSort === 'date_desc') {
+    return [...list].sort((a, b) => {
+      const dateA = new Date(a.kickoff_utc).getTime() || -Infinity;
+      const dateB = new Date(b.kickoff_utc).getTime() || -Infinity;
+
+      return dateB - dateA;
+    });
+  }
+
+  return [...list].sort(byDateAsc);
 }
 
 // ========== Авторизация / безопасность ==========
@@ -685,7 +808,7 @@ function emptyUserDelta() {
 }
 
 function addResultToDelta(delta, result, sign) {
-  if (!delta || !result || !result.type) return;
+  if (!delta || !result) return;
 
   const points = toNum(result.points, 0);
 
@@ -717,7 +840,8 @@ function addResultToDelta(delta, result, sign) {
 }
 
 // Идемпотентный пересчет очков для конкретного матча:
-// сначала вычитаем старые очки прогноза, потом добавляем новые.
+// учитываем только самый последний прогноз пользователя на матч.
+// Старые дубли помечаем как duplicate и обнуляем.
 async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
   const ah = toScore(homeScore);
   const aa = toScore(awayScore);
@@ -727,7 +851,9 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
   }
 
   const matchIdStr = String(matchId).trim();
+
   const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const latestMap = getLatestPredictionMap(predictionsData);
 
   const predictionUpdates = [];
   const userDeltas = new Map();
@@ -736,21 +862,54 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
     if (!isDataRow(row, 'prediction_id')) return;
 
     const predictionMatchId = String(row[2] || '').trim();
-
     if (predictionMatchId !== matchIdStr) return;
 
     const userId = String(row[1] || '').trim();
+    if (!userId) return;
+
+    const key = `${userId}|${predictionMatchId}`;
+    const latest = latestMap.get(key);
+
+    if (!latest) return;
 
     const oldPoints = toNum(row[7], 0);
     const oldType = String(row[8] || '').trim();
 
-    const newResult = calculatePoints(row[3], row[4], ah, aa);
+    const ensureDelta = () => {
+      if (!userDeltas.has(userId)) {
+        userDeltas.set(userId, emptyUserDelta());
+      }
 
+      return userDeltas.get(userId);
+    };
+
+    // Если это не последний прогноз пользователя на матч — обнуляем его
+    if (rowIndex !== latest.rowIndex) {
+      if (oldPoints !== 0 || oldType !== 'duplicate') {
+        const updatedPrediction = padRow(row, EXPECTED_COLUMNS.Predictions);
+
+        // Важно: не меняем updated_at у дубля, чтобы он случайно не стал "последним"
+        updatedPrediction[7] = 0;
+        updatedPrediction[8] = 'duplicate';
+
+        predictionUpdates.push({
+          rowIndex,
+          values: updatedPrediction,
+        });
+
+        addResultToDelta(ensureDelta(), { points: oldPoints, type: oldType }, -1);
+      }
+
+      return;
+    }
+
+    const newResult = calculatePoints(row[3], row[4], ah, aa);
     const changed = oldPoints !== newResult.points || oldType !== newResult.type;
 
     if (!changed) return;
 
     const updatedPrediction = padRow(row, EXPECTED_COLUMNS.Predictions);
+
     updatedPrediction[6] = new Date().toISOString();
     updatedPrediction[7] = newResult.points;
     updatedPrediction[8] = newResult.type;
@@ -760,13 +919,7 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
       values: updatedPrediction,
     });
 
-    if (!userId) return;
-
-    if (!userDeltas.has(userId)) {
-      userDeltas.set(userId, emptyUserDelta());
-    }
-
-    const delta = userDeltas.get(userId);
+    const delta = ensureDelta();
 
     addResultToDelta(delta, { points: oldPoints, type: oldType }, -1);
     addResultToDelta(delta, newResult, 1);
@@ -970,7 +1123,6 @@ async function updateFinishedMatches() {
     if (rowIndex === -1) continue;
 
     const current = padRow(matchesData[rowIndex], EXPECTED_COLUMNS.Matches);
-
     const scoreLocked = String(current[9] || '').toUpperCase() === 'TRUE';
 
     if (scoreLocked) continue;
@@ -989,6 +1141,7 @@ async function updateFinishedMatches() {
     }
 
     const updated = [...current];
+
     updated[5] = 'finished';
     updated[6] = homeScore;
     updated[7] = awayScore;
@@ -1037,7 +1190,6 @@ function buildEventRows(matchId, events, homeTeam, awayTeam) {
     const rawTeam = event.team?.name || '';
     const team = translateTeam(rawTeam);
     const player = event.player?.name || '';
-
     const minute = toNum(event.minute, 0);
     const addedTime = toNum(event.injuryTime, 0);
 
@@ -1134,7 +1286,8 @@ async function updateMatchEventsForFinished() {
   return matchesToProcess.length;
 }
 
-// Полный безопасный пересчет всей таблицы
+// Полный безопасный пересчет всей таблицы.
+// Учитываем только последний прогноз пользователя на каждый матч.
 async function recalculateAll() {
   const usersData = await getSheetData('Users', 'A:Z');
   const predictionsData = await getSheetData('Predictions', 'A:Z');
@@ -1146,7 +1299,6 @@ async function recalculateAll() {
     if (!isDataRow(row, 'match_id')) return;
 
     const status = String(row[5] || '').trim();
-
     if (status !== 'finished') return;
 
     const homeScore = toScore(row[6]);
@@ -1160,6 +1312,8 @@ async function recalculateAll() {
     });
   });
 
+  const latestMap = getLatestPredictionMap(predictionsData);
+
   const userStats = new Map();
   const userRowIndexById = new Map();
 
@@ -1167,7 +1321,6 @@ async function recalculateAll() {
     if (!isDataRow(row, 'user_id')) return;
 
     const userId = String(row[0]).trim();
-
     if (!userId) return;
 
     userRowIndexById.set(userId, rowIndex);
@@ -1192,6 +1345,32 @@ async function recalculateAll() {
     const userId = String(row[1] || '').trim();
     const matchId = String(row[2] || '').trim();
 
+    if (!userId || !matchId) return;
+
+    const key = `${userId}|${matchId}`;
+    const latest = latestMap.get(key);
+
+    const oldPoints = toNum(row[7], 0);
+    const oldType = String(row[8] || '').trim();
+
+    // Все, что не является последним прогнозом — помечаем как duplicate
+    if (!latest || rowIndex !== latest.rowIndex) {
+      if (oldPoints !== 0 || oldType !== 'duplicate') {
+        const updatedPrediction = padRow(row, EXPECTED_COLUMNS.Predictions);
+
+        // Не меняем updated_at, чтобы дубль не стал случайно последним
+        updatedPrediction[7] = 0;
+        updatedPrediction[8] = 'duplicate';
+
+        predictionUpdates.push({
+          rowIndex,
+          values: updatedPrediction,
+        });
+      }
+
+      return;
+    }
+
     const stats = userStats.get(userId);
 
     if (stats) {
@@ -1204,7 +1383,12 @@ async function recalculateAll() {
     const finishedMatch = finishedMatches.get(matchId);
 
     if (finishedMatch) {
-      const result = calculatePoints(row[3], row[4], finishedMatch.homeScore, finishedMatch.awayScore);
+      const result = calculatePoints(
+        row[3],
+        row[4],
+        finishedMatch.homeScore,
+        finishedMatch.awayScore
+      );
 
       points = result.points;
       type = result.type;
@@ -1224,11 +1408,9 @@ async function recalculateAll() {
       }
     }
 
-    const oldPoints = toNum(row[7], 0);
-    const oldType = String(row[8] || '').trim();
-
     if (oldPoints !== points || oldType !== type) {
       const updatedPrediction = padRow(row, EXPECTED_COLUMNS.Predictions);
+
       updatedPrediction[6] = new Date().toISOString();
       updatedPrediction[7] = points;
       updatedPrediction[8] = type;
@@ -1244,13 +1426,12 @@ async function recalculateAll() {
 
   for (const [userId, stats] of userStats.entries()) {
     const rowIndex = userRowIndexById.get(userId);
-
     if (rowIndex === undefined) continue;
 
     const updatedUser = padRow(usersData[rowIndex], EXPECTED_COLUMNS.Users);
 
     updatedUser[4] = stats.totalPoints;
-    updatedUser[5] = 0; // current_position (обновим при следующем запросе standings)
+    updatedUser[5] = 0; // current_position
     updatedUser[6] = stats.successfulPredictions;
     updatedUser[7] = stats.exactScores;
     updatedUser[8] = stats.goalDifference;
@@ -1268,6 +1449,47 @@ async function recalculateAll() {
   await batchWriteRows('Users', userUpdates);
 
   return finishedMatches.size;
+}
+
+async function getUserPredictionsResponse(userId, query = {}) {
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const predictionsData = await getSheetData('Predictions', 'A:Z');
+
+  const matches = matchesData.filter(row => isDataRow(row, 'match_id'));
+  const userPredictions = getLatestPredictionsForUser(predictionsData, userId);
+
+  let result = userPredictions
+    .map(prediction => {
+      const matchId = String(prediction[2]).trim();
+
+      const match = matches.find(item => String(item[0]).trim() === matchId);
+      if (!match) return null;
+
+      return {
+        match_id: matchId,
+        stage: match[1] || '',
+        home_team: match[2] || '',
+        away_team: match[3] || '',
+        kickoff_utc: match[4] || '',
+        status: match[5] || '',
+        home_score: toScore(match[6]),
+        away_score: toScore(match[7]),
+        predicted_home: toScore(prediction[3]),
+        predicted_away: toScore(prediction[4]),
+        points: toNum(prediction[7], 0),
+        prediction_type: prediction[8] || '',
+      };
+    })
+    .filter(Boolean);
+
+  result = filterPredictionResponseByType(result, query.type);
+
+  const statusFilter = String(query.status || '').toLowerCase().trim();
+  if (statusFilter) {
+    result = result.filter(item => item.status === statusFilter);
+  }
+
+  return sortPredictionsResponse(result, query.sort);
 }
 
 // ========== Telegram Long Polling ==========
@@ -1362,7 +1584,6 @@ async function processTelegramMessage(msg) {
 
   for (const line of lines) {
     const parsed = parsePredictionText(line);
-
     if (!parsed) continue;
 
     const homeNormalized = normalizeTeamName(parsed.home);
@@ -1390,16 +1611,19 @@ async function processTelegramMessage(msg) {
     }
 
     const predictionsData = await getSheetData('Predictions', 'A:Z');
+    const existingIndexes = [];
 
-    const existingRows = predictionsData.filter(row => {
-      return isDataRow(row, 'prediction_id') &&
+    predictionsData.forEach((row, rowIndex) => {
+      if (
+        isDataRow(row, 'prediction_id') &&
         String(row[1]).trim() === userId &&
-        String(row[2]).trim() === matchId;
+        String(row[2]).trim() === matchId
+      ) {
+        existingIndexes.push(rowIndex);
+      }
     });
 
-    for (const row of existingRows) {
-      await deleteRow('Predictions', row[0]);
-    }
+    await deleteRowsByRowIndices('Predictions', existingIndexes);
 
     await appendRows('Predictions', [[
       `${userId}_${matchId}`,
@@ -1537,13 +1761,10 @@ app.get('/api/matches', asyncHandler(async (req, res) => {
 
   if (userId) {
     const predictionsData = await getSheetData('Predictions', 'A:Z');
-
-    userPredictions = predictionsData.filter(row => {
-      return isDataRow(row, 'prediction_id') && String(row[1]).trim() === userId;
-    });
+    userPredictions = getLatestPredictionsForUser(predictionsData, userId);
   }
 
-  const result = matches.map(row => {
+  let result = matches.map(row => {
     const matchId = String(row[0]).trim();
 
     const userPrediction = userPredictions.find(prediction => {
@@ -1569,6 +1790,17 @@ app.get('/api/matches', asyncHandler(async (req, res) => {
     };
   });
 
+  const includeFinished = String(req.query.includeFinished || 'true').toLowerCase() !== 'false';
+  const statusFilter = String(req.query.status || '').toLowerCase().trim();
+
+  if (!includeFinished) {
+    result = result.filter(item => item.status !== 'finished');
+  }
+
+  if (statusFilter) {
+    result = result.filter(item => item.status === statusFilter);
+  }
+
   result.sort((a, b) => {
     const dateA = new Date(a.kickoff_utc).getTime() || Infinity;
     const dateB = new Date(b.kickoff_utc).getTime() || Infinity;
@@ -1589,18 +1821,13 @@ app.get('/api/my-predictions', asyncHandler(async (req, res) => {
   const predictionsData = await getSheetData('Predictions', 'A:Z');
 
   const matches = matchesData.filter(row => isDataRow(row, 'match_id'));
-  const predictions = predictionsData.filter(row => isDataRow(row, 'prediction_id'));
+  const userPredictions = getLatestPredictionsForUser(predictionsData, userId);
 
-  const userPredictions = predictions.filter(prediction => {
-    return String(prediction[1]).trim() === userId;
-  });
-
-  const result = userPredictions
+  let result = userPredictions
     .map(prediction => {
       const matchId = String(prediction[2]).trim();
 
       const match = matches.find(item => String(item[0]).trim() === matchId);
-
       if (!match) return null;
 
       return {
@@ -1620,18 +1847,31 @@ app.get('/api/my-predictions', asyncHandler(async (req, res) => {
     })
     .filter(Boolean);
 
-  result.sort((a, b) => {
-    const dateA = new Date(a.kickoff_utc).getTime() || Infinity;
-    const dateB = new Date(b.kickoff_utc).getTime() || Infinity;
-    return dateA - dateB;
-  });
+  result = filterPredictionResponseByType(result, req.query.type);
 
+  const statusFilter = String(req.query.status || '').toLowerCase().trim();
+  if (statusFilter) {
+    result = result.filter(item => item.status === statusFilter);
+  }
+
+  result = sortPredictionsResponse(result, req.query.sort);
+
+  res.json(result);
+}));
+
+app.get('/api/user-predictions/:userId', asyncHandler(async (req, res) => {
+  const userId = String(req.params.userId || '').trim();
+
+  if (!userId) {
+    return res.status(400).json({ error: 'userId required' });
+  }
+
+  const result = await getUserPredictionsResponse(userId, req.query);
   res.json(result);
 }));
 
 app.post('/api/predictions', asyncHandler(async (req, res) => {
   const userId = extractUserId(req);
-
   const { matchId, predictedHome, predictedAway } = req.body;
 
   if (!userId || !matchId || predictedHome === undefined || predictedAway === undefined) {
@@ -1676,16 +1916,19 @@ app.post('/api/predictions', asyncHandler(async (req, res) => {
   }
 
   const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const existingIndexes = [];
 
-  const existingRows = predictionsData.filter(row => {
-    return isDataRow(row, 'prediction_id') &&
+  predictionsData.forEach((row, rowIndex) => {
+    if (
+      isDataRow(row, 'prediction_id') &&
       String(row[1]).trim() === String(userId).trim() &&
-      String(row[2]).trim() === String(matchId).trim();
+      String(row[2]).trim() === String(matchId).trim()
+    ) {
+      existingIndexes.push(rowIndex);
+    }
   });
 
-  for (const row of existingRows) {
-    await deleteRow('Predictions', row[0]);
-  }
+  await deleteRowsByRowIndices('Predictions', existingIndexes);
 
   await appendRows('Predictions', [[
     `${userId}_${matchId}`,
@@ -1754,10 +1997,11 @@ app.get('/api/match-predictions/:matchId', asyncHandler(async (req, res) => {
   const matchId = String(req.params.matchId || '').trim();
 
   const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const latestMap = getLatestPredictionMap(predictionsData);
 
-  const matchPredictions = predictionsData.filter(row => {
-    return isDataRow(row, 'prediction_id') && String(row[2]).trim() === matchId;
-  });
+  const matchPredictions = [...latestMap.values()]
+    .map(item => predictionsData[item.rowIndex])
+    .filter(row => row && String(row[2] || '').trim() === matchId);
 
   const usersData = await getSheetData('Users', 'A:Z');
 
@@ -1794,7 +2038,6 @@ app.get('/api/match-events/:matchId', asyncHandler(async (req, res) => {
     if (String(row[0]).trim() !== matchId) return false;
 
     const eventType = String(row[1] || '').trim();
-
     return eventType !== 'no_events' && eventType !== 'events_unavailable';
   });
 
@@ -1817,7 +2060,6 @@ app.get('/api/match-events/:matchId', asyncHandler(async (req, res) => {
 
 app.get('/api/standings', asyncHandler(async (req, res) => {
   const usersData = await getSheetData('Users', 'A:Z');
-
   const users = usersData.filter(row => isDataRow(row, 'user_id'));
 
   const table = users
@@ -1836,16 +2078,55 @@ app.get('/api/standings', asyncHandler(async (req, res) => {
     }))
     .filter(user => user.userId);
 
-  table.sort((a, b) => {
-    if (b.totalPoints !== a.totalPoints) return b.totalPoints - a.totalPoints;
-    if (b.successfulPredictions !== a.successfulPredictions) return b.successfulPredictions - a.successfulPredictions;
-    if (b.exactScores !== a.exactScores) return b.exactScores - a.exactScores;
-    if (b.goalDifference !== a.goalDifference) return b.goalDifference - a.goalDifference;
-    if (b.draws !== a.draws) return b.draws - a.draws;
-    if (b.outcomes !== a.outcomes) return b.outcomes - a.outcomes;
+  const sortBy = String(req.query.sortBy || '').toLowerCase().trim();
+  const requestedOrder = String(req.query.order || '').toLowerCase().trim();
 
-    return String(a.userId).localeCompare(String(b.userId), 'ru', { numeric: true });
-  });
+  const sortableFields = {
+    points: 'totalPoints',
+    totalpoints: 'totalPoints',
+    exact: 'exactScores',
+    exactscores: 'exactScores',
+    difference: 'goalDifference',
+    goaldifference: 'goalDifference',
+    draws: 'draws',
+    outcomes: 'outcomes',
+    misses: 'misses',
+    successful: 'successfulPredictions',
+    successfulpredictions: 'successfulPredictions',
+  };
+
+  if (sortBy && sortableFields[sortBy]) {
+    const field = sortableFields[sortBy];
+
+    const order = requestedOrder
+      ? (requestedOrder === 'asc' ? 1 : -1)
+      : (sortBy === 'misses' ? 1 : -1);
+
+    table.sort((a, b) => {
+      return ((a[field] || 0) - (b[field] || 0)) * order ||
+        String(a.userId).localeCompare(String(b.userId), 'ru', { numeric: true });
+    });
+  } else {
+    // Дефолдная турнирная сортировка:
+    // максимальные очки -> точные -> разница -> ничьи -> исходы -> минимальные промахи
+    table.sort((a, b) => {
+      if (b.totalPoints !== a.totalPoints) return b.totalPoints - a.totalPoints;
+      if (b.exactScores !== a.exactScores) return b.exactScores - a.exactScores;
+      if (b.goalDifference !== a.goalDifference) return b.goalDifference - a.goalDifference;
+      if (b.draws !== a.draws) return b.draws - a.draws;
+      if (b.outcomes !== a.outcomes) return b.outcomes - a.outcomes;
+
+      // минимальный промах лучше
+      if (a.misses !== b.misses) return a.misses - b.misses;
+
+      // дополнительный tie-breaker
+      if (b.successfulPredictions !== a.successfulPredictions) {
+        return b.successfulPredictions - a.successfulPredictions;
+      }
+
+      return String(a.userId).localeCompare(String(b.userId), 'ru', { numeric: true });
+    });
+  }
 
   table.forEach((row, index) => {
     row.position = index + 1;
