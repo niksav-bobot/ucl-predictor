@@ -233,21 +233,20 @@ function getLatestPredictionMap(predictionsData) {
 
     const key = `${userId}|${matchId}`;
 
-    const updatedTime =
-      Date.parse(row[6] || '') ||
-      Date.parse(row[5] || '') ||
-      0;
+    const createdTime = Date.parse(row[5] || '') || 0;
+    const fallbackUpdatedTime = Date.parse(row[6] || '') || 0;
+    const submissionTime = createdTime || fallbackUpdatedTime;
 
     const current = latest.get(key);
 
     if (
       !current ||
-      updatedTime > current.updatedTime ||
-      (updatedTime === current.updatedTime && rowIndex > current.rowIndex)
+      submissionTime > current.submissionTime ||
+      (submissionTime === current.submissionTime && rowIndex > current.rowIndex)
     ) {
       latest.set(key, {
         rowIndex,
-        updatedTime,
+        submissionTime,
         userId,
         matchId,
       });
@@ -299,6 +298,29 @@ async function deleteRowsByRowIndices(sheetName, rowIndexes) {
       },
     });
   }
+}
+
+
+async function cleanupDuplicatePredictions() {
+  const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const latestMap = getLatestPredictionMap(predictionsData);
+  const rowsToDelete = [];
+
+  predictionsData.forEach((row, rowIndex) => {
+    if (!isDataRow(row, 'prediction_id')) return;
+
+    const userId = String(row[1] || '').trim();
+    const matchId = String(row[2] || '').trim();
+    if (!userId || !matchId) return;
+
+    const latest = latestMap.get(`${userId}|${matchId}`);
+    if (!latest || latest.rowIndex !== rowIndex) {
+      rowsToDelete.push(rowIndex);
+    }
+  });
+
+  await deleteRowsByRowIndices('Predictions', rowsToDelete);
+  return rowsToDelete.length;
 }
 
 function filterPredictionResponseByType(list, typeFilter) {
@@ -861,7 +883,6 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
     if (!changed) return;
 
     const updatedPrediction = padRow(row, EXPECTED_COLUMNS.Predictions);
-    updatedPrediction[6] = new Date().toISOString();
     updatedPrediction[7] = newResult.points;
     updatedPrediction[8] = newResult.type;
 
@@ -1233,7 +1254,6 @@ async function recalculateAll() {
 
     if (oldPoints !== points || oldType !== type) {
       const updatedPrediction = padRow(row, EXPECTED_COLUMNS.Predictions);
-      updatedPrediction[6] = new Date().toISOString();
       updatedPrediction[7] = points;
       updatedPrediction[8] = type;
       predictionUpdates.push({ rowIndex, values: updatedPrediction });
@@ -1265,6 +1285,7 @@ async function recalculateAll() {
   return finishedMatches.size;
 }
 
+
 async function getUserPredictionsResponse(userId, query = {}) {
   const matchesData = await getSheetData('Matches', 'A:J');
   const predictionsData = await getSheetData('Predictions', 'A:Z');
@@ -1277,19 +1298,39 @@ async function getUserPredictionsResponse(userId, query = {}) {
     const match = matches.find(item => String(item[0]).trim() === matchId);
     if (!match) return null;
 
+    const status = String(match[5] || '').trim();
+    const homeScore = toScore(match[6]);
+    const awayScore = toScore(match[7]);
+
+    let points = 0;
+    let predictionType = '';
+
+    if (status === 'finished' && homeScore !== null && awayScore !== null) {
+      const calculated = calculatePoints(
+        prediction[3],
+        prediction[4],
+        homeScore,
+        awayScore,
+      );
+      points = calculated.points;
+      predictionType = calculated.type;
+    }
+
     return {
       match_id: matchId,
       stage: match[1] || '',
       home_team: match[2] || '',
       away_team: match[3] || '',
       kickoff_utc: match[4] || '',
-      status: match[5] || '',
-      home_score: toScore(match[6]),
-      away_score: toScore(match[7]),
+      status,
+      home_score: homeScore,
+      away_score: awayScore,
       predicted_home: toScore(prediction[3]),
       predicted_away: toScore(prediction[4]),
-      points: toNum(prediction[7], 0),
-      prediction_type: prediction[8] || '',
+      points,
+      prediction_type: predictionType,
+      created_at: prediction[5] || '',
+      updated_at: prediction[6] || prediction[5] || '',
     };
   }).filter(Boolean);
 
@@ -1301,6 +1342,108 @@ async function getUserPredictionsResponse(userId, query = {}) {
   }
 
   return sortPredictionsResponse(result, query.sort);
+}
+
+async function buildStandingsSnapshot() {
+  const [usersData, predictionsData, matchesData] = await Promise.all([
+    getSheetData('Users', 'A:Z'),
+    getSheetData('Predictions', 'A:Z'),
+    getSheetData('Matches', 'A:J'),
+  ]);
+
+  const users = usersData.filter(row => isDataRow(row, 'user_id'));
+  const latestMap = getLatestPredictionMap(predictionsData);
+
+  const finishedMatches = new Map();
+
+  matchesData.forEach(row => {
+    if (!isDataRow(row, 'match_id')) return;
+
+    const matchId = String(row[0] || '').trim();
+    const status = String(row[5] || '').trim();
+    const homeScore = toScore(row[6]);
+    const awayScore = toScore(row[7]);
+
+    if (
+      matchId &&
+      status === 'finished' &&
+      homeScore !== null &&
+      awayScore !== null
+    ) {
+      finishedMatches.set(matchId, { homeScore, awayScore });
+    }
+  });
+
+  const statsByUser = new Map();
+
+  users.forEach(row => {
+    const userId = String(row[0] || '').trim();
+    if (!userId) return;
+
+    statsByUser.set(userId, {
+      userId,
+      username: row[1] || '',
+      displayName: row[2] || row[1] || 'User',
+      registrationDate: row[3] || '',
+      totalPoints: 0,
+      totalPredictions: 0,
+      successfulPredictions: 0,
+      exactScores: 0,
+      goalDifference: 0,
+      draws: 0,
+      outcomes: 0,
+      misses: 0,
+    });
+  });
+
+  for (const item of latestMap.values()) {
+    const prediction = predictionsData[item.rowIndex];
+    if (!prediction) continue;
+
+    const userId = String(prediction[1] || '').trim();
+    const matchId = String(prediction[2] || '').trim();
+    if (!userId || !matchId) continue;
+
+    if (!statsByUser.has(userId)) {
+      statsByUser.set(userId, {
+        userId,
+        username: '',
+        displayName: userId,
+        registrationDate: '',
+        totalPoints: 0,
+        totalPredictions: 0,
+        successfulPredictions: 0,
+        exactScores: 0,
+        goalDifference: 0,
+        draws: 0,
+        outcomes: 0,
+        misses: 0,
+      });
+    }
+
+    const stats = statsByUser.get(userId);
+    stats.totalPredictions++;
+
+    const finished = finishedMatches.get(matchId);
+    if (!finished) continue;
+
+    const result = calculatePoints(
+      prediction[3],
+      prediction[4],
+      finished.homeScore,
+      finished.awayScore,
+    );
+
+    stats.totalPoints += result.points;
+    if (result.points > 0) stats.successfulPredictions++;
+    if (result.type === 'exact') stats.exactScores++;
+    if (result.type === 'difference') stats.goalDifference++;
+    if (result.type === 'draw') stats.draws++;
+    if (result.type === 'outcome') stats.outcomes++;
+    if (result.type === 'miss') stats.misses++;
+  }
+
+  return [...statsByUser.values()];
 }
 
 // ========== Telegram Long Polling ==========
@@ -1680,31 +1823,67 @@ app.post('/api/admin/match-result', requireAdmin, asyncHandler(async (req, res) 
 
 app.get('/api/match-predictions/:matchId', asyncHandler(async (req, res) => {
   const matchId = String(req.params.matchId || '').trim();
-  const predictionsData = await getSheetData('Predictions', 'A:Z');
+
+  const [predictionsData, usersData, matchesData] = await Promise.all([
+    getSheetData('Predictions', 'A:Z'),
+    getSheetData('Users', 'A:Z'),
+    getSheetData('Matches', 'A:J'),
+  ]);
+
   const latestMap = getLatestPredictionMap(predictionsData);
 
   const matchPredictions = [...latestMap.values()]
     .map(item => predictionsData[item.rowIndex])
     .filter(row => row && String(row[2] || '').trim() === matchId);
 
-  const usersData = await getSheetData('Users', 'A:Z');
   const userMap = new Map();
 
   usersData.forEach(row => {
     if (!isDataRow(row, 'user_id')) return;
-    const userId = String(row[0]).trim();
-    const displayName = row[2] || row[1] || userId;
-    userMap.set(userId, displayName);
+    const predictionUserId = String(row[0]).trim();
+    const displayName = row[2] || row[1] || predictionUserId;
+    userMap.set(predictionUserId, displayName);
   });
 
-  const result = matchPredictions.map(prediction => ({
-    userId: String(prediction[1] || '').trim(),
-    displayName: userMap.get(String(prediction[1] || '').trim()) || prediction[1],
-    predictedHome: toScore(prediction[3]),
-    predictedAway: toScore(prediction[4]),
-    points: toNum(prediction[7], 0),
-    predictionType: prediction[8] || '',
-  }));
+  const match = matchesData.find(row => {
+    return isDataRow(row, 'match_id') && String(row[0] || '').trim() === matchId;
+  });
+
+  const status = String(match?.[5] || '').trim();
+  const homeScore = toScore(match?.[6]);
+  const awayScore = toScore(match?.[7]);
+
+  const result = matchPredictions.map(prediction => {
+    let points = 0;
+    let predictionType = '';
+
+    if (status === 'finished' && homeScore !== null && awayScore !== null) {
+      const calculated = calculatePoints(
+        prediction[3],
+        prediction[4],
+        homeScore,
+        awayScore,
+      );
+      points = calculated.points;
+      predictionType = calculated.type;
+    }
+
+    const predictionUserId = String(prediction[1] || '').trim();
+
+    return {
+      userId: predictionUserId,
+      displayName: userMap.get(predictionUserId) || predictionUserId,
+      predictedHome: toScore(prediction[3]),
+      predictedAway: toScore(prediction[4]),
+      points,
+      predictionType,
+    };
+  });
+
+  result.sort((a, b) => {
+    return b.points - a.points ||
+      String(a.displayName).localeCompare(String(b.displayName), 'ru', { sensitivity: 'base' });
+  });
 
   res.json(result);
 }));
@@ -1735,60 +1914,90 @@ app.get('/api/match-events/:matchId', asyncHandler(async (req, res) => {
   res.json(result);
 }));
 
-app.get('/api/standings', asyncHandler(async (req, res) => {
-  const usersData = await getSheetData('Users', 'A:Z');
-  const users = usersData.filter(row => isDataRow(row, 'user_id'));
 
-  const table = users.map(row => ({
-    userId: String(row[0] || '').trim(),
-    username: row[1] || '',
-    displayName: row[2] || row[1] || 'User',
-    registrationDate: row[3] || '',
-    totalPoints: toNum(row[4], 0),
-    successfulPredictions: toNum(row[6], 0),
-    exactScores: toNum(row[7], 0),
-    goalDifference: toNum(row[8], 0),
-    draws: toNum(row[9], 0),
-    outcomes: toNum(row[10], 0),
-    misses: toNum(row[11], 0),
-  })).filter(user => user.userId);
+app.get('/api/standings', asyncHandler(async (req, res) => {
+  const table = await buildStandingsSnapshot();
 
   const sortBy = String(req.query.sortBy || '').toLowerCase().trim();
   const requestedOrder = String(req.query.order || '').toLowerCase().trim();
 
   const sortableFields = {
-    points: 'totalPoints', totalpoints: 'totalPoints',
-    exact: 'exactScores', exactscores: 'exactScores',
-    difference: 'goalDifference', goaldifference: 'goalDifference',
-    draws: 'draws', outcomes: 'outcomes', misses: 'misses',
-    successful: 'successfulPredictions', successfulpredictions: 'successfulPredictions',
+    points: 'totalPoints',
+    totalpoints: 'totalPoints',
+    exact: 'exactScores',
+    exactscores: 'exactScores',
+    difference: 'goalDifference',
+    goaldifference: 'goalDifference',
+    draws: 'draws',
+    outcomes: 'outcomes',
+    misses: 'misses',
+    successful: 'successfulPredictions',
+    successfulpredictions: 'successfulPredictions',
+  };
+
+  const defaultComparator = (a, b) => {
+    if (b.totalPoints !== a.totalPoints) return b.totalPoints - a.totalPoints;
+    if (b.exactScores !== a.exactScores) return b.exactScores - a.exactScores;
+    if (b.goalDifference !== a.goalDifference) return b.goalDifference - a.goalDifference;
+    if (b.draws !== a.draws) return b.draws - a.draws;
+    if (b.outcomes !== a.outcomes) return b.outcomes - a.outcomes;
+    if (a.misses !== b.misses) return a.misses - b.misses;
+    if (b.successfulPredictions !== a.successfulPredictions) {
+      return b.successfulPredictions - a.successfulPredictions;
+    }
+
+    return String(a.displayName || a.userId).localeCompare(
+      String(b.displayName || b.userId),
+      'ru',
+      { numeric: true, sensitivity: 'base' },
+    );
   };
 
   if (sortBy && sortableFields[sortBy]) {
     const field = sortableFields[sortBy];
-    const order = requestedOrder ? (requestedOrder === 'asc' ? 1 : -1) : (sortBy === 'misses' ? 1 : -1);
+    const defaultOrder = sortBy === 'misses' ? 'asc' : 'desc';
+    const orderName = requestedOrder === 'asc' || requestedOrder === 'desc'
+      ? requestedOrder
+      : defaultOrder;
+    const multiplier = orderName === 'asc' ? 1 : -1;
 
     table.sort((a, b) => {
-      return ((a[field] || 0) - (b[field] || 0)) * order ||
-        String(a.userId).localeCompare(String(b.userId), 'ru', { numeric: true });
+      const primary = (toNum(a[field], 0) - toNum(b[field], 0)) * multiplier;
+      if (primary !== 0) return primary;
+      return defaultComparator(a, b);
     });
   } else {
-    table.sort((a, b) => {
-      if (b.totalPoints !== a.totalPoints) return b.totalPoints - a.totalPoints;
-      if (b.exactScores !== a.exactScores) return b.exactScores - a.exactScores;
-      if (b.goalDifference !== a.goalDifference) return b.goalDifference - a.goalDifference;
-      if (b.draws !== a.draws) return b.draws - a.draws;
-      if (b.outcomes !== a.outcomes) return b.outcomes - a.outcomes;
-      if (a.misses !== b.misses) return a.misses - b.misses;
-      if (b.successfulPredictions !== a.successfulPredictions) return b.successfulPredictions - a.successfulPredictions;
-      return String(a.userId).localeCompare(String(b.userId), 'ru', { numeric: true });
-    });
+    table.sort(defaultComparator);
   }
 
-  table.forEach((row, index) => { row.position = index + 1; });
+  let previousSignature = null;
+  let previousPosition = 0;
+
+  table.forEach((row, index) => {
+    const signature = [
+      row.totalPoints,
+      row.exactScores,
+      row.goalDifference,
+      row.draws,
+      row.outcomes,
+      row.misses,
+      row.successfulPredictions,
+    ].join('|');
+
+    if (sortBy && sortableFields[sortBy]) {
+      row.position = index + 1;
+    } else if (signature === previousSignature) {
+      row.position = previousPosition;
+    } else {
+      row.position = index + 1;
+      previousPosition = row.position;
+      previousSignature = signature;
+    }
+  });
 
   res.json(table);
 }));
+
 
 app.post('/api/admin/sync-matches', requireAdmin, asyncHandler(async (req, res) => {
   try {
@@ -1816,6 +2025,16 @@ app.post('/api/admin/update-events', requireAdmin, asyncHandler(async (req, res)
     res.json({ success: true, processed });
   } catch (error) {
     console.error('Update events error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+}));
+
+app.post('/api/admin/cleanup-prediction-duplicates', requireAdmin, asyncHandler(async (req, res) => {
+  try {
+    const removed = await cleanupDuplicatePredictions();
+    res.json({ success: true, removed });
+  } catch (error) {
+    console.error('Cleanup duplicate predictions error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 }));
