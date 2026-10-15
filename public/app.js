@@ -5,266 +5,643 @@ tg.expand();
 const userId = tg.initDataUnsafe?.user?.id;
 const initData = tg.initData;
 
+const state = {
+  standingsSort: { sortBy: '', order: '' },
+  myPredictionFilter: 'all',
+  pastMatchesOpen: false,
+};
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function formatDateTime(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return 'Дата не указана';
+
+  return date.toLocaleString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function formatDay(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return 'Без даты';
+
+  return date.toLocaleDateString('ru-RU', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  });
+}
+
+function getDayKey(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return 'unknown';
+
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function typeLabel(type) {
+  const labels = {
+    exact: 'Точный счёт',
+    difference: 'Разница',
+    draw: 'Ничья',
+    outcome: 'Исход',
+    miss: 'Промах',
+  };
+
+  return labels[type] || '';
+}
+
+async function apiJson(url, options = {}) {
+  const response = await fetch(url, options);
+  let data = null;
+
+  try {
+    data = await response.json();
+  } catch (error) {
+    data = null;
+  }
+
+  if (!response.ok) {
+    const message = data?.error || `Ошибка HTTP ${response.status}`;
+    throw new Error(message);
+  }
+
+  return data;
+}
+
+function closeModal() {
+  document.querySelector('.modal-overlay')?.remove();
+}
+
+function openModal(title, bodyHtml) {
+  closeModal();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>${escapeHtml(title)}</h3>
+        <button class="icon-button modal-close" aria-label="Закрыть">×</button>
+      </div>
+      <div class="modal-body">${bodyHtml}</div>
+      <button class="secondary-button modal-bottom-close">Закрыть</button>
+    </div>
+  `;
+
+  document.body.appendChild(overlay);
+
+  overlay.addEventListener('click', event => {
+    if (event.target === overlay) closeModal();
+  });
+  overlay.querySelector('.modal-close').onclick = closeModal;
+  overlay.querySelector('.modal-bottom-close').onclick = closeModal;
+
+  return overlay;
+}
+
 async function auth() {
   if (!userId) {
-    document.getElementById('app').innerHTML = '<p>Откройте приложение через Telegram.</p>';
+    document.getElementById('app').innerHTML = '<div class="empty-state">Откройте приложение через Telegram.</div>';
     return;
   }
+
   try {
-    const res = await fetch('/api/auth', {
+    const data = await apiJson('/api/auth', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ initData })
+      body: JSON.stringify({ initData }),
     });
-    const data = await res.json();
+
     if (data.userId) {
-      loadMatches();
-    } else {
-      alert('Ошибка авторизации');
+      await loadMatches();
     }
-  } catch (e) {
-    console.error(e);
-    document.getElementById('app').innerHTML = '<p>Ошибка соединения с сервером.</p>';
+  } catch (error) {
+    console.error(error);
+    document.getElementById('app').innerHTML = `<div class="empty-state error">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function buildMatchCard(match, { finished = false } = {}) {
+  const card = document.createElement('div');
+  card.className = `match-card${finished ? ' finished-match' : ''}`;
+
+  const statusLabels = {
+    scheduled: 'Предстоит',
+    live: 'Идёт',
+    finished: 'Завершён',
+    postponed: 'Перенесён',
+  };
+
+  const predictionText = match.user_prediction
+    ? `<div class="prediction-line">Ваш прогноз: <strong>${match.user_prediction.home} - ${match.user_prediction.away}</strong></div>`
+    : '';
+
+  const scoreText = match.status === 'finished'
+    ? `<div class="score-line">Счёт: <strong>${match.home_score ?? '-'} - ${match.away_score ?? '-'}</strong></div>`
+    : '';
+
+  card.innerHTML = `
+    <div class="match-card-main">
+      <div class="match-title">
+        ${escapeHtml(match.home_team)} <span class="vs">vs</span> ${escapeHtml(match.away_team)}
+        ${match.user_has_predicted ? '<span class="check-mark">✓</span>' : ''}
+      </div>
+      <div class="muted">${escapeHtml(match.stage || '')}</div>
+      <div class="muted">${escapeHtml(formatDateTime(match.kickoff_utc))}</div>
+      <div class="status status-${escapeHtml(match.status)}">${escapeHtml(statusLabels[match.status] || match.status || '')}</div>
+      ${scoreText}
+      ${predictionText}
+    </div>
+    <div class="match-actions"></div>
+  `;
+
+  const actions = card.querySelector('.match-actions');
+
+  if (match.status === 'scheduled') {
+    const predictButton = document.createElement('button');
+    predictButton.className = 'primary-button';
+    predictButton.textContent = match.user_has_predicted ? 'Изменить прогноз' : 'Сделать прогноз';
+    predictButton.onclick = () => showPredictionModal(match);
+    actions.appendChild(predictButton);
+  }
+
+  const allButton = document.createElement('button');
+  allButton.className = 'secondary-button';
+  allButton.textContent = 'Прогнозы';
+  allButton.onclick = () => showAllPredictions(match);
+  actions.appendChild(allButton);
+
+  return card;
+}
+
+function renderFinishedMatches(container, matches) {
+  container.innerHTML = '';
+
+  if (!matches.length) {
+    container.innerHTML = '<div class="empty-state compact">Прошедших матчей пока нет.</div>';
+    return;
+  }
+
+  const grouped = new Map();
+
+  [...matches]
+    .sort((a, b) => new Date(b.kickoff_utc) - new Date(a.kickoff_utc))
+    .forEach(match => {
+      const key = getDayKey(match.kickoff_utc);
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          label: formatDay(match.kickoff_utc),
+          matches: [],
+        });
+      }
+      grouped.get(key).matches.push(match);
+    });
+
+  for (const group of grouped.values()) {
+    const daySection = document.createElement('section');
+    daySection.className = 'past-day';
+    daySection.innerHTML = `<h3>${escapeHtml(group.label)}</h3>`;
+
+    group.matches.forEach(match => {
+      daySection.appendChild(buildMatchCard(match, { finished: true }));
+    });
+
+    container.appendChild(daySection);
   }
 }
 
 async function loadMatches() {
-  try {
-    const res = await fetch(`/api/matches?userId=${userId}`);
-    const matches = await res.json();
-    const app = document.getElementById('app');
-    app.innerHTML = '<h2>Матчи</h2>';
-    if (matches.length === 0) {
-      app.innerHTML += '<p>Нет матчей.</p>';
-      return;
-    }
-    matches.forEach(match => {
-      const card = document.createElement('div');
-      card.className = 'match-card';
-      const kickoff = new Date(match.kickoff_utc).toLocaleString();
-      let statusText = match.status === 'scheduled' ? 'Предстоит' : match.status;
-      let predIcon = '';
-      if (match.user_has_predicted) {
-        predIcon = ' ✅';
-      }
-      card.innerHTML = `
-        <strong>${match.home_team} vs ${match.away_team}${predIcon}</strong><br>
-        Дата: ${kickoff}<br>
-        Статус: ${statusText}
-        ${match.status === 'finished' ? `<br>Счёт: ${match.home_score} - ${match.away_score}` : ''}
-        ${match.user_prediction ? `<br>Ваш прогноз: ${match.user_prediction.home} - ${match.user_prediction.away}` : ''}
-      `;
-      if (match.status === 'scheduled') {
-        const btn = document.createElement('button');
-        btn.className = 'btn-predict';
-        btn.textContent = match.user_has_predicted ? 'Изменить прогноз' : 'Сделать прогноз';
-        btn.onclick = () => showPredictionModal(match);
-        card.appendChild(btn);
-      }
-      const allBtn = document.createElement('button');
-      allBtn.className = 'btn-all-predictions';
-      allBtn.textContent = 'Прогнозы';
-      allBtn.onclick = () => showAllPredictions(match);
-      card.appendChild(allBtn);
+  const app = document.getElementById('app');
+  app.innerHTML = '<div class="loading">Загрузка матчей…</div>';
 
-      app.appendChild(card);
-    });
-  } catch (e) {
-    console.error(e);
-    document.getElementById('app').innerHTML = '<p>Ошибка загрузки матчей.</p>';
+  try {
+    const matches = await apiJson(`/api/matches?userId=${encodeURIComponent(userId)}&includeFinished=true`);
+
+    const activeMatches = matches
+      .filter(match => match.status !== 'finished')
+      .sort((a, b) => new Date(a.kickoff_utc) - new Date(b.kickoff_utc));
+
+    const finishedMatches = matches.filter(match => match.status === 'finished');
+
+    app.innerHTML = `
+      <div class="section-header">
+        <h2>Матчи</h2>
+        <span class="badge">${activeMatches.length} актуальных</span>
+      </div>
+      <div id="active-matches"></div>
+      <button id="toggle-past-matches" class="past-toggle">
+        ${state.pastMatchesOpen ? 'Скрыть прошедшие матчи' : `Прошедшие матчи (${finishedMatches.length})`}
+      </button>
+      <div id="past-matches" class="${state.pastMatchesOpen ? '' : 'hidden'}"></div>
+    `;
+
+    const activeContainer = document.getElementById('active-matches');
+
+    if (!activeMatches.length) {
+      activeContainer.innerHTML = '<div class="empty-state">Нет предстоящих или текущих матчей.</div>';
+    } else {
+      activeMatches.forEach(match => activeContainer.appendChild(buildMatchCard(match)));
+    }
+
+    const pastContainer = document.getElementById('past-matches');
+    renderFinishedMatches(pastContainer, finishedMatches);
+
+    document.getElementById('toggle-past-matches').onclick = () => {
+      state.pastMatchesOpen = !state.pastMatchesOpen;
+      pastContainer.classList.toggle('hidden', !state.pastMatchesOpen);
+
+      document.getElementById('toggle-past-matches').textContent = state.pastMatchesOpen
+        ? 'Скрыть прошедшие матчи'
+        : `Прошедшие матчи (${finishedMatches.length})`;
+    };
+  } catch (error) {
+    console.error(error);
+    app.innerHTML = `<div class="empty-state error">Ошибка загрузки матчей: ${escapeHtml(error.message)}</div>`;
   }
 }
 
 function showPredictionModal(match) {
-  const existing = document.querySelector('.modal-overlay');
-  if (existing) existing.remove();
+  const currentHome = match.user_prediction?.home ?? 0;
+  const currentAway = match.user_prediction?.away ?? 0;
 
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.style.cssText = 'position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:1000;';
-  overlay.innerHTML = `
-    <div style="background:white; padding:20px; border-radius:12px; width:90%; max-width:350px;">
-      <h3>Прогноз на матч</h3>
-      <p>${match.home_team} vs ${match.away_team}</p>
-      <div style="display:flex; justify-content:space-around; align-items:center;">
-        <label>Голы ${match.home_team}: <input type="number" id="homeGoals" min="0" max="20" value="0"></label>
-        <label>Голы ${match.away_team}: <input type="number" id="awayGoals" min="0" max="20" value="0"></label>
+  const overlay = openModal(
+    'Прогноз на матч',
+    `
+      <div class="modal-match-name">${escapeHtml(match.home_team)} vs ${escapeHtml(match.away_team)}</div>
+      <div class="score-inputs">
+        <label>
+          <span>${escapeHtml(match.home_team)}</span>
+          <input type="number" id="homeGoals" min="0" max="20" value="${currentHome}">
+        </label>
+        <span class="score-separator">:</span>
+        <label>
+          <span>${escapeHtml(match.away_team)}</span>
+          <input type="number" id="awayGoals" min="0" max="20" value="${currentAway}">
+        </label>
       </div>
-      <button id="save-prediction" style="margin-top:15px; width:100%; padding:10px; background:#34c759; color:white; border:none; border-radius:8px;">Сохранить</button>
-      <button id="cancel-prediction" style="margin-top:5px; width:100%; padding:10px; background:#999; color:white; border:none; border-radius:8px;">Отмена</button>
-    </div>
-  `;
-  document.body.appendChild(overlay);
+      <button id="save-prediction" class="primary-button full-width">Сохранить</button>
+    `,
+  );
 
-  document.getElementById('save-prediction').onclick = () => submitPrediction(match.match_id, overlay);
-  document.getElementById('cancel-prediction').onclick = () => overlay.remove();
+  overlay.querySelector('#save-prediction').onclick = () => submitPrediction(match.match_id);
 }
 
-async function submitPrediction(matchId, overlay) {
+async function submitPrediction(matchId) {
   const homeGoals = document.getElementById('homeGoals').value;
   const awayGoals = document.getElementById('awayGoals').value;
+
   try {
-    const res = await fetch('/api/predictions', {
+    const data = await apiJson('/api/predictions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         initData,
         matchId,
         predictedHome: homeGoals,
-        predictedAway: awayGoals
-      })
+        predictedAway: awayGoals,
+      }),
     });
-    const data = await res.json();
+
     if (data.success) {
-      alert('Прогноз сохранён');
-      overlay.remove();
-      loadMatches();
-    } else {
-      alert(data.error || 'Ошибка');
+      closeModal();
+      tg.HapticFeedback?.notificationOccurred?.('success');
+      await loadMatches();
     }
-  } catch (e) {
-    console.error(e);
-    alert('Ошибка сети');
+  } catch (error) {
+    console.error(error);
+    alert(error.message || 'Ошибка сохранения прогноза');
   }
 }
 
 async function showAllPredictions(match) {
   try {
-    const res = await fetch(`/api/match-predictions/${match.match_id}`);
-    const preds = await res.json();
+    const [preds, events] = await Promise.all([
+      apiJson(`/api/match-predictions/${encodeURIComponent(match.match_id)}`),
+      (match.status === 'finished' || match.status === 'live')
+        ? apiJson(`/api/match-events/${encodeURIComponent(match.match_id)}`).catch(() => [])
+        : Promise.resolve([]),
+    ]);
 
-    let events = [];
-    if (match.status === 'finished' || match.status === 'live') {
-      const evRes = await fetch(`/api/match-events/${match.match_id}`);
-      if (evRes.ok) events = await evRes.json();
+    let predictionsHtml = '<div class="responsive-table"><table><thead><tr><th>Участник</th><th>Прогноз</th><th>Очки</th></tr></thead><tbody>';
+
+    if (!preds.length) {
+      predictionsHtml += '<tr><td colspan="3">Прогнозов пока нет.</td></tr>';
+    } else {
+      preds.forEach(prediction => {
+        predictionsHtml += `
+          <tr>
+            <td>${escapeHtml(prediction.displayName)}</td>
+            <td>${prediction.predictedHome} - ${prediction.predictedAway}</td>
+            <td>${prediction.points ?? 0}</td>
+          </tr>
+        `;
+      });
     }
 
-    const existing = document.querySelector('.modal-overlay');
-    if (existing) existing.remove();
-
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    overlay.style.cssText = 'position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:1000;';
-
-    const matchTitle = `${match.home_team} vs ${match.away_team}`;
-    const scoreLine = (match.home_score !== undefined && match.away_score !== undefined) ? ` ${match.home_score} - ${match.away_score}` : '';
-
-    let tableHtml = '<table><tr><th>Участник</th><th>Прогноз</th><th>Очки</th></tr>';
-    preds.forEach(p => {
-      tableHtml += `<tr><td>${p.displayName}</td><td>${p.predictedHome} - ${p.predictedAway}</td><td>${p.points}</td></tr>`;
-    });
-    tableHtml += '</table>';
+    predictionsHtml += '</tbody></table></div>';
 
     let eventsHtml = '';
-    if (events.length > 0) {
-      eventsHtml = '<div style="margin-top:15px;"><h4>Голы</h4><ul>';
-      events.forEach(ev => {
-        const minuteLabel = ev.addedTime > 0 ? `${ev.minute}+${ev.addedTime}` : ev.minute;
-        eventsHtml += `<li>${minuteLabel}' — ${ev.team}: ${ev.player} (${ev.scoreAfterEvent})</li>`;
+    if (events.length) {
+      eventsHtml = '<div class="events-block"><h4>Голы</h4><ul>';
+      events.forEach(event => {
+        const minuteLabel = event.addedTime > 0
+          ? `${event.minute}+${event.addedTime}`
+          : event.minute;
+
+        eventsHtml += `<li>${escapeHtml(minuteLabel)}' — ${escapeHtml(event.team)}: ${escapeHtml(event.player || '')}${event.scoreAfterEvent ? ` (${escapeHtml(event.scoreAfterEvent)})` : ''}</li>`;
       });
       eventsHtml += '</ul></div>';
     }
 
-    overlay.innerHTML = `
-      <div style="background:white; padding:20px; border-radius:12px; width:90%; max-width:400px;">
-        <h3>${matchTitle}${scoreLine}</h3>
-        ${tableHtml}
-        ${eventsHtml}
-        <button id="close-all" style="margin-top:10px; width:100%; padding:10px; background:#999; color:white; border:none; border-radius:8px;">Закрыть</button>
+    const scoreText = match.status === 'finished'
+      ? ` · ${match.home_score ?? '-'}:${match.away_score ?? '-'}`
+      : '';
+
+    openModal(
+      `${match.home_team} — ${match.away_team}${scoreText}`,
+      predictionsHtml + eventsHtml,
+    );
+  } catch (error) {
+    console.error(error);
+    alert(`Ошибка загрузки прогнозов: ${error.message}`);
+  }
+}
+
+function predictionCardHtml(prediction) {
+  const finished = prediction.status === 'finished';
+  const type = typeLabel(prediction.prediction_type);
+
+  return `
+    <div class="prediction-item ${prediction.prediction_type === 'exact' ? 'prediction-exact' : ''}">
+      <div class="prediction-item-title">${escapeHtml(prediction.home_team)} vs ${escapeHtml(prediction.away_team)}</div>
+      <div class="muted">${escapeHtml(formatDateTime(prediction.kickoff_utc))}</div>
+      <div>Прогноз: <strong>${prediction.predicted_home ?? '-'} - ${prediction.predicted_away ?? '-'}</strong></div>
+      ${finished ? `<div>Счёт: <strong>${prediction.home_score ?? '-'} - ${prediction.away_score ?? '-'}</strong></div>` : ''}
+      ${finished ? `<div class="result-line">${type ? `${escapeHtml(type)} · ` : ''}<strong>${prediction.points} очк.</strong></div>` : '<div class="muted">Матч ещё не завершён</div>'}
+    </div>
+  `;
+}
+
+async function loadMyPredictions(filter = state.myPredictionFilter) {
+  state.myPredictionFilter = filter;
+
+  const app = document.getElementById('app');
+  app.innerHTML = '<div class="loading">Загрузка прогнозов…</div>';
+
+  try {
+    const params = new URLSearchParams({
+      userId: String(userId),
+      sort: filter === 'exact_first' ? 'exact_first' : 'date_desc',
+    });
+
+    if (!['all', 'exact_first'].includes(filter)) {
+      params.set('type', filter);
+    }
+
+    const predictions = await apiJson(`/api/my-predictions?${params.toString()}`);
+
+    app.innerHTML = `
+      <div class="section-header">
+        <h2>Мои прогнозы</h2>
+        <span class="badge">${predictions.length}</span>
+      </div>
+      <div class="filter-bar" id="my-prediction-filters">
+        <button data-filter="all" class="${filter === 'all' ? 'active' : ''}">Все</button>
+        <button data-filter="exact_first" class="${filter === 'exact_first' ? 'active' : ''}">ТС первыми</button>
+        <button data-filter="exact" class="${filter === 'exact' ? 'active' : ''}">Только ТС</button>
+        <button data-filter="successful" class="${filter === 'successful' ? 'active' : ''}">С очками</button>
+        <button data-filter="miss" class="${filter === 'miss' ? 'active' : ''}">Промахи</button>
+      </div>
+      <div id="my-predictions-list"></div>
+    `;
+
+    document.querySelectorAll('#my-prediction-filters button').forEach(button => {
+      button.onclick = () => loadMyPredictions(button.dataset.filter);
+    });
+
+    const list = document.getElementById('my-predictions-list');
+
+    if (!predictions.length) {
+      list.innerHTML = filter === 'exact'
+        ? '<div class="empty-state">Пока нет матчей с полностью угаданным счётом.</div>'
+        : '<div class="empty-state">По выбранному фильтру прогнозов нет.</div>';
+      return;
+    }
+
+    predictions.forEach(prediction => {
+      list.insertAdjacentHTML('beforeend', predictionCardHtml(prediction));
+    });
+  } catch (error) {
+    console.error(error);
+    app.innerHTML = `<div class="empty-state error">Ошибка загрузки прогнозов: ${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function nextStandingsSort(sortBy) {
+  const current = state.standingsSort;
+
+  if (current.sortBy !== sortBy) {
+    return {
+      sortBy,
+      order: sortBy === 'misses' ? 'asc' : 'desc',
+    };
+  }
+
+  return {
+    sortBy,
+    order: current.order === 'asc' ? 'desc' : 'asc',
+  };
+}
+
+function sortArrow(sortBy) {
+  if (state.standingsSort.sortBy !== sortBy) return '';
+  return state.standingsSort.order === 'asc' ? ' ↑' : ' ↓';
+}
+
+async function loadStandings(sortBy = state.standingsSort.sortBy, order = state.standingsSort.order) {
+  state.standingsSort = { sortBy, order };
+
+  const app = document.getElementById('app');
+  app.innerHTML = '<div class="loading">Расчёт таблицы…</div>';
+
+  try {
+    const params = new URLSearchParams();
+    if (sortBy) params.set('sortBy', sortBy);
+    if (order) params.set('order', order);
+
+    const url = params.toString() ? `/api/standings?${params.toString()}` : '/api/standings';
+    const table = await apiJson(url);
+
+    app.innerHTML = `
+      <div class="section-header">
+        <h2>Турнирная таблица</h2>
+        <span class="badge">${table.length} участников</span>
+      </div>
+      <div class="standings-hint">
+        Нажимай на имя — все прогнозы участника. На цифру в колонке — матчи соответствующей категории.
+      </div>
+      <div class="filter-bar standings-sort-bar">
+        <button data-sort="" class="${!sortBy ? 'active' : ''}">Комплексно</button>
+        <button data-sort="points" class="${sortBy === 'points' ? 'active' : ''}">Очки</button>
+        <button data-sort="exact" class="${sortBy === 'exact' ? 'active' : ''}">Точные</button>
+        <button data-sort="difference" class="${sortBy === 'difference' ? 'active' : ''}">Разницы</button>
+        <button data-sort="draws" class="${sortBy === 'draws' ? 'active' : ''}">Ничьи</button>
+        <button data-sort="outcomes" class="${sortBy === 'outcomes' ? 'active' : ''}">Исходы</button>
+        <button data-sort="misses" class="${sortBy === 'misses' ? 'active' : ''}">Промахи</button>
+      </div>
+      <div class="responsive-table standings-table-wrap">
+        <table class="standings-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Участник</th>
+              <th><button class="table-sort" data-sort="points">Очки${sortArrow('points')}</button></th>
+              <th><button class="table-sort" data-sort="successful">Угадано${sortArrow('successful')}</button></th>
+              <th><button class="table-sort" data-sort="exact">Точные${sortArrow('exact')}</button></th>
+              <th><button class="table-sort" data-sort="difference">Разницы${sortArrow('difference')}</button></th>
+              <th><button class="table-sort" data-sort="draws">Ничьи${sortArrow('draws')}</button></th>
+              <th><button class="table-sort" data-sort="outcomes">Исходы${sortArrow('outcomes')}</button></th>
+              <th><button class="table-sort" data-sort="misses">Промахи${sortArrow('misses')}</button></th>
+            </tr>
+          </thead>
+          <tbody id="standings-body"></tbody>
+        </table>
       </div>
     `;
-    document.body.appendChild(overlay);
-    document.getElementById('close-all').onclick = () => overlay.remove();
-  } catch (e) {
-    console.error(e);
-    alert('Ошибка загрузки прогнозов');
-  }
-}
 
-async function loadMyPredictions() {
-  try {
-    const res = await fetch(`/api/my-predictions?userId=${userId}`);
-    const predictions = await res.json();
-    const app = document.getElementById('app');
-    app.innerHTML = '<h2>Мои прогнозы</h2>';
+    const body = document.getElementById('standings-body');
 
-    if (predictions.length === 0) {
-      app.innerHTML += '<p>У вас пока нет прогнозов.</p>';
-      return;
+    if (!table.length) {
+      body.innerHTML = '<tr><td colspan="9">Нет участников.</td></tr>';
+    } else {
+      table.forEach(row => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${row.position}</td>
+          <td><button class="link-button participant-link">${escapeHtml(row.displayName)}</button></td>
+          <td><button class="metric-button metric-points">${row.totalPoints}</button></td>
+          <td><button class="metric-button metric-successful">${row.successfulPredictions}</button></td>
+          <td><button class="metric-button metric-exact">${row.exactScores}</button></td>
+          <td><button class="metric-button metric-difference">${row.goalDifference}</button></td>
+          <td><button class="metric-button metric-draw">${row.draws}</button></td>
+          <td><button class="metric-button metric-outcome">${row.outcomes}</button></td>
+          <td><button class="metric-button metric-miss">${row.misses}</button></td>
+        `;
+
+        tr.querySelector('.participant-link').onclick = () => {
+          showParticipantPredictions(row.userId, row.displayName, 'all');
+        };
+        tr.querySelector('.metric-points').onclick = () => {
+          showParticipantPredictions(row.userId, row.displayName, 'successful');
+        };
+        tr.querySelector('.metric-successful').onclick = () => {
+          showParticipantPredictions(row.userId, row.displayName, 'successful');
+        };
+        tr.querySelector('.metric-exact').onclick = () => {
+          showParticipantPredictions(row.userId, row.displayName, 'exact');
+        };
+        tr.querySelector('.metric-difference').onclick = () => {
+          showParticipantPredictions(row.userId, row.displayName, 'difference');
+        };
+        tr.querySelector('.metric-draw').onclick = () => {
+          showParticipantPredictions(row.userId, row.displayName, 'draw');
+        };
+        tr.querySelector('.metric-outcome').onclick = () => {
+          showParticipantPredictions(row.userId, row.displayName, 'outcome');
+        };
+        tr.querySelector('.metric-miss').onclick = () => {
+          showParticipantPredictions(row.userId, row.displayName, 'miss');
+        };
+
+        body.appendChild(tr);
+      });
     }
 
-    const grouped = {};
-    predictions.forEach(p => {
-      const stage = p.stage || 'Другое';
-      if (!grouped[stage]) grouped[stage] = [];
-      grouped[stage].push(p);
+    document.querySelectorAll('.table-sort').forEach(button => {
+      button.onclick = () => {
+        const next = nextStandingsSort(button.dataset.sort);
+        loadStandings(next.sortBy, next.order);
+      };
     });
 
-    for (const stage in grouped) {
-      const stageDiv = document.createElement('div');
-      stageDiv.className = 'stage-group';
-      stageDiv.innerHTML = `<h3>${stage}</h3>`;
-      const list = document.createElement('div');
-      list.className = 'prediction-list';
+    document.querySelectorAll('.standings-sort-bar button').forEach(button => {
+      button.onclick = () => {
+        const selected = button.dataset.sort;
 
-      grouped[stage].forEach(p => {
-        const item = document.createElement('div');
-        item.className = 'prediction-item';
-        const kickoff = new Date(p.kickoff_utc).toLocaleString();
-        const statusText = p.status === 'finished' ? `Счёт: ${p.home_score} - ${p.away_score}` : p.status;
-
-        let pointText = '';
-        if (p.points) {
-          if (p.prediction_type === 'exact') {
-            pointText = `<br>У тебя ТС 👍<br>Очки: ${p.points}`;
-          } else {
-            pointText = `<br>Очки: ${p.points}`;
-          }
+        if (!selected) {
+          state.standingsSort = { sortBy: '', order: '' };
+          loadStandings('', '');
+          return;
         }
 
-        item.innerHTML = `
-          <strong>${p.home_team} vs ${p.away_team}</strong><br>
-          Дата: ${kickoff}<br>
-          Статус: ${statusText}<br>
-          Ваш прогноз: ${p.predicted_home} - ${p.predicted_away}
-          ${pointText}
-        `;
-        list.appendChild(item);
-      });
-
-      stageDiv.appendChild(list);
-      app.appendChild(stageDiv);
-    }
-  } catch (e) {
-    console.error(e);
-    document.getElementById('app').innerHTML = '<p>Ошибка загрузки прогнозов.</p>';
-  }
-}
-
-async function loadStandings() {
-  try {
-    const res = await fetch('/api/standings');
-    const table = await res.json();
-    const app = document.getElementById('app');
-    app.innerHTML = '<h2>Турнирная таблица</h2>';
-    if (table.length === 0) {
-      app.innerHTML += '<p>Нет участников.</p>';
-      return;
-    }
-    let html = '<table><tr><th>#</th><th>Имя</th><th>Очки</th><th>Точные</th><th>Разницы</th><th>Ничьи</th><th>Исходы</th><th>Промахи</th></tr>';
-    table.forEach(row => {
-      html += `<tr><td>${row.position}</td><td>${row.displayName}</td><td>${row.totalPoints}</td><td>${row.exactScores}</td><td>${row.goalDifference}</td><td>${row.draws}</td><td>${row.outcomes}</td><td>${row.misses}</td></tr>`;
+        const next = nextStandingsSort(selected);
+        loadStandings(next.sortBy, next.order);
+      };
     });
-    html += '</table>';
-    app.innerHTML = html;
-  } catch (e) {
-    console.error(e);
-    document.getElementById('app').innerHTML = '<p>Ошибка загрузки таблицы.</p>';
+  } catch (error) {
+    console.error(error);
+    app.innerHTML = `<div class="empty-state error">Ошибка загрузки таблицы: ${escapeHtml(error.message)}</div>`;
   }
 }
 
-document.getElementById('nav-matches').addEventListener('click', () => { loadMatches(); });
-document.getElementById('nav-my-predictions').addEventListener('click', () => { loadMyPredictions(); });
-document.getElementById('nav-standings').addEventListener('click', () => { loadStandings(); });
+async function showParticipantPredictions(targetUserId, displayName, type) {
+  const titles = {
+    all: `Все прогнозы — ${displayName}`,
+    successful: `Матчи с очками — ${displayName}`,
+    exact: `Точные счета — ${displayName}`,
+    difference: `Угаданная разница — ${displayName}`,
+    draw: `Угаданные ничьи — ${displayName}`,
+    outcome: `Угаданные исходы — ${displayName}`,
+    miss: `Промахи — ${displayName}`,
+  };
+
+  try {
+    const params = new URLSearchParams({ sort: 'date_desc' });
+    if (type && type !== 'all') params.set('type', type);
+
+    const predictions = await apiJson(
+      `/api/user-predictions/${encodeURIComponent(targetUserId)}?${params.toString()}`,
+    );
+
+    const bodyHtml = predictions.length
+      ? predictions.map(predictionCardHtml).join('')
+      : '<div class="empty-state compact">Матчей по этой категории нет.</div>';
+
+    openModal(titles[type] || titles.all, bodyHtml);
+  } catch (error) {
+    console.error(error);
+    alert(`Ошибка загрузки прогнозов участника: ${error.message}`);
+  }
+}
+
+document.getElementById('nav-matches').addEventListener('click', () => {
+  loadMatches();
+});
+
+document.getElementById('nav-my-predictions').addEventListener('click', () => {
+  loadMyPredictions('all');
+});
+
+document.getElementById('nav-standings').addEventListener('click', () => {
+  state.standingsSort = { sortBy: '', order: '' };
+  loadStandings('', '');
+});
 
 auth();
