@@ -130,11 +130,11 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 // ========== Уровни ==========
 function calculateLevel(totalEarned) {
   const t = toNum(totalEarned, 0);
-  if (t >= 5000) return 5; // Профи
-  if (t >= 2000) return 4; // Снайпер
-  if (t >= 1000) return 3; // Аналитик
-  if (t >= 500)  return 2; // Прогнозист
-  if (t >= 100)  return 1; // Новичок
+  if (t >= 5000) return 5;
+  if (t >= 2000) return 4;
+  if (t >= 1000) return 3;
+  if (t >= 500)  return 2;
+  if (t >= 100)  return 1;
   return 0;
 }
 function levelToName(level) {
@@ -151,7 +151,7 @@ function getLevelThreshold(level) {
 function getMatchdayKey(utcDate) {
   const d = new Date(utcDate);
   if (!Number.isFinite(d.getTime())) return null;
-  return d.toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+  return d.toISOString().slice(0, 10);
 }
 function todayUtcKey() {
   return new Date().toISOString().slice(0, 10);
@@ -223,13 +223,125 @@ async function deleteRowsByRowIndices(sheet, indexes) {
   invalidateSheetCache(sheet);
 }
 
+// ========== Миграция ==========
+async function setupSheet(sheetName, expectedHeaders) {
+  let exists = true;
+  try {
+    await sheetsRequestWithRetry(() =>
+      sheets.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID,
+        range: `${quoteSheetName(sheetName)}!A1:A1`,
+      })
+    );
+  } catch (err) {
+    exists = false;
+  }
+
+  if (!exists) {
+    await sheetsRequestWithRetry(() =>
+      sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: { requests: [{ addSheet: { properties: { title: sheetName } } }] },
+      })
+    );
+    delete sheetIdCache[sheetName];
+    await sheetsRequestWithRetry(() =>
+      sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: `${quoteSheetName(sheetName)}!A1:${columnLetter(expectedHeaders.length)}1`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [expectedHeaders] },
+      })
+    );
+    invalidateSheetCache(sheetName);
+    return { created: true, updated: false };
+  }
+
+  const res = await sheetsRequestWithRetry(() =>
+    sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${quoteSheetName(sheetName)}!A1:AZ1`,
+    })
+  );
+  const currentHeaders = res.data.values?.[0] || [];
+  const maxLen = Math.max(currentHeaders.length, expectedHeaders.length);
+  const merged = [];
+  for (let i = 0; i < maxLen; i++) merged.push(currentHeaders[i] ?? expectedHeaders[i] ?? '');
+
+  const changed = merged.length !== currentHeaders.length
+    || merged.some((h, i) => h !== (currentHeaders[i] ?? ''));
+  if (!changed) return { created: false, updated: false };
+
+  await sheetsRequestWithRetry(() =>
+    sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `${quoteSheetName(sheetName)}!A1:${columnLetter(merged.length)}1`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [merged] },
+    })
+  );
+  invalidateSheetCache(sheetName);
+  return { created: false, updated: true, headers: merged };
+}
+
+async function migrateFantiki() {
+  const result = { sheetsCreated: [], columnsUpdated: [], usersInitialized: 0, predictionsInitialized: 0 };
+
+  const newSheets = [
+    { name: 'FantikiTransactions', headers: ['tx_id', 'user_id', 'amount', 'reason', 'ref_id', 'created_at', 'balance_after'] },
+    { name: 'Duels', headers: ['duel_id', 'match_id', 'creator_id', 'stake', 'status', 'created_at', 'settled_at', 'pot', 'winner_ids'] },
+    { name: 'DuelBets', headers: ['bet_id', 'duel_id', 'user_id', 'predicted_home', 'predicted_away', 'joined_at', 'result'] },
+    { name: 'QuestsProgress', headers: ['user_id', 'quest_id', 'matchday_key', 'completed_at', 'awarded'] },
+    { name: 'MatchdayBonuses', headers: ['bonus_id', 'matchday_key', 'type', 'user_id', 'place', 'amount', 'awarded_at'] },
+  ];
+  for (const s of newSheets) {
+    const r = await setupSheet(s.name, s.headers);
+    if (r.created) result.sheetsCreated.push(s.name);
+  }
+
+  const usersHeaders = ['user_id', 'username', 'display_name', 'registration_date', 'points', 'total_predictions', 'successful', 'exact', 'difference', 'draws', 'outcomes', 'misses', 'fantiki_balance', 'total_earned_season', 'level', 'historical_earned'];
+  const predHeaders = ['prediction_id', 'user_id', 'match_id', 'predicted_home', 'predicted_away', 'created_at', 'updated_at', 'points', 'prediction_type', 'fantiki_awarded', 'is_starred'];
+
+  const uR = await setupSheet('Users', usersHeaders);
+  if (uR.updated) result.columnsUpdated.push('Users');
+  const pR = await setupSheet('Predictions', predHeaders);
+  if (pR.updated) result.columnsUpdated.push('Predictions');
+
+  const usersData = await getSheetData('Users', 'A:P');
+  const userUpdates = [];
+  usersData.forEach((row, idx) => {
+    if (!isDataRow(row, 'user_id')) return;
+    const padded = padRow(row, EXPECTED_COLUMNS.Users);
+    let changed = false;
+    if (padded[12] === '' || padded[12] == null) { padded[12] = 0; changed = true; }
+    if (padded[13] === '' || padded[13] == null) { padded[13] = 0; changed = true; }
+    if (padded[14] === '' || padded[14] == null) { padded[14] = 0; changed = true; }
+    if (padded[15] === '' || padded[15] == null) { padded[15] = 0; changed = true; }
+    if (changed) { userUpdates.push({ rowIndex: idx, values: padded }); result.usersInitialized++; }
+  });
+  if (userUpdates.length) await batchWriteRows('Users', userUpdates);
+
+  const predData = await getSheetData('Predictions', 'A:K');
+  const predUpdates = [];
+  predData.forEach((row, idx) => {
+    if (!isDataRow(row, 'prediction_id')) return;
+    const padded = padRow(row, EXPECTED_COLUMNS.Predictions);
+    let changed = false;
+    if (padded[9] === '' || padded[9] == null) { padded[9] = 0; changed = true; }
+    if (padded[10] === '' || padded[10] == null) { padded[10] = 'FALSE'; changed = true; }
+    if (changed) { predUpdates.push({ rowIndex: idx, values: padded }); result.predictionsInitialized++; }
+  });
+  if (predUpdates.length) await batchWriteRows('Predictions', predUpdates);
+
+  return result;
+}
+
 // ========== Начисление фантиков ==========
 async function awardFantiki(userId, amount, reason, refId = '', idempotencyKey = '') {
   const amt = toNum(amount, 0);
   if (!userId || !amt) return { success: false, error: 'Invalid params' };
   const uid = String(userId).trim();
 
-  // Idempotency: если передан ключ вида "reason|ref_id" — проверяем, была ли уже такая транзакция
   if (idempotencyKey) {
     const txData = await getSheetData('FantikiTransactions', 'A:G');
     const exists = txData.some(r => isDataRow(r, 'tx_id')
@@ -392,7 +504,7 @@ function normalizeTeamName(name) {
   return teamAliases.has(cleaned) ? teamAliases.get(cleaned) : String(name || '').trim();
 }
 
-// ========== Odds API helpers ==========
+// ========== Odds helpers ==========
 const ruToApiTeam = new Map();
 const apiTeamLowerMap = new Map();
 Object.entries(teamTranslations).forEach(([api, ru]) => { ruToApiTeam.set(ru.toLowerCase().trim(), api); apiTeamLowerMap.set(api.toLowerCase().trim(), api); });
@@ -600,21 +712,18 @@ async function checkMatchdayStreakBonus(matchdayKey) {
   const dayMatches = matchesData.filter(r => isDataRow(r, 'match_id') && getMatchdayKey(r[4]) === matchdayKey);
   if (dayMatches.length === 0) return;
 
-  // Все матчи дня должны быть finished/postponed/cancelled
   const allDone = dayMatches.every(r => {
     const status = String(r[5] || '').trim();
     return status === 'finished' || status === 'postponed' || status === 'cancelled';
   });
   if (!allDone) return;
 
-  // Проверка: уже начислено?
   const bonusesData = await getSheetData('MatchdayBonuses', 'A:G');
   const alreadyDone = bonusesData.some(r => isDataRow(r, 'bonus_id')
     && String(r[1] || '').trim() === matchdayKey
     && String(r[2] || '').trim() === 'streak');
   if (alreadyDone) return;
 
-  // Считаем ТС по пользователям
   const { Predictions: predictionsData } = await batchGetSheets([
     { sheet: 'Predictions', range: 'A:K' },
   ]);
@@ -646,7 +755,6 @@ async function checkMatchdayStreakBonus(matchdayKey) {
     }
   }
 
-  // Маркер, что день обработан
   const bonusId = `bonus_streak_${matchdayKey}`;
   await appendRows('MatchdayBonuses', [[
     bonusId, matchdayKey, 'streak', '', '', totalBonus, new Date().toISOString(),
@@ -655,7 +763,6 @@ async function checkMatchdayStreakBonus(matchdayKey) {
   return { matchdayKey, awardedCount, totalBonus };
 }
 
-// ========== Проверка всех недавних matchday ==========
 async function checkRecentMatchdays() {
   const matchesData = await getSheetData('Matches', 'A:J');
   const daySet = new Set();
@@ -718,7 +825,7 @@ async function checkQuestsProgress(userId, matchdayKey) {
   if (outcomesCount >= 3) await tryAward('three_outcomes', 15);
 }
 
-// ========== Football-Data sync ==========
+// ========== Football sync ==========
 async function fetchUCLMatches() {
   const data = await fetchFootball(`/competitions/CL/matches?season=${SEASON}`);
   const apiMatches = data.matches || [];
@@ -1122,6 +1229,75 @@ app.post('/api/admin/finalize-matchday/:date', requireAdmin, asyncHandler(async 
 app.post('/api/admin/finalize-recent', requireAdmin, asyncHandler(async (req, res) => {
   const results = await checkRecentMatchdays();
   res.json({ success: true, results });
+}));
+
+app.post('/api/admin/finalize-all', requireAdmin, asyncHandler(async (req, res) => {
+  const daysParam = req.query.days ? Number(req.query.days) : null;
+  const days = Number.isFinite(daysParam) && daysParam > 0 ? Math.floor(daysParam) : null;
+
+  res.json({
+    success: true,
+    scope: days ? `last ${days} days` : 'all matches',
+    message: 'Started in background. Watch Render logs and FantikiTransactions sheet.',
+  });
+
+  (async () => {
+    try {
+      const cutoffMs = days ? Date.now() - days * 24 * 60 * 60 * 1000 : 0;
+      const scopeLabel = days ? `за ${days} дн.` : 'за всё время';
+      console.log(`🔄 [finalize-all] SCOPE: ${scopeLabel}, cutoff=${new Date(cutoffMs).toISOString()}`);
+
+      const matchesData = await getSheetData('Matches', 'A:J');
+      const finishedMatches = matchesData.filter(r => {
+        if (!isDataRow(r, 'match_id')) return false;
+        if (String(r[5] || '').trim() !== 'finished') return false;
+        if (toScore(r[6]) === null || toScore(r[7]) === null) return false;
+        if (!days) return true;
+        const kickoffMs = new Date(r[4] || '').getTime();
+        if (!Number.isFinite(kickoffMs)) return false;
+        return kickoffMs >= cutoffMs;
+      });
+
+      console.log(`🔄 [finalize-all] Найдено ${finishedMatches.length} матчей ${scopeLabel}`);
+
+      const matchdays = new Set();
+      let processed = 0, errors = 0;
+
+      for (const row of finishedMatches) {
+        const matchId = String(row[0]).trim();
+        const hs = toScore(row[6]), as = toScore(row[7]);
+        try {
+          await recalculatePointsForMatch(matchId, hs, as);
+          processed++;
+          const k = getMatchdayKey(row[4]);
+          if (k) matchdays.add(k);
+          if (processed % 5 === 0) console.log(`[finalize-all] Прогресс: ${processed}/${finishedMatches.length}`);
+        } catch (e) {
+          console.error(`[finalize-all] Match ${matchId} failed:`, e.message);
+          errors++;
+        }
+        await sleep(500);
+      }
+
+      console.log(`🔄 [finalize-all] Streak по ${matchdays.size} matchday: ${[...matchdays].join(', ')}`);
+      for (const key of matchdays) {
+        try {
+          const r = await checkMatchdayStreakBonus(key);
+          if (r && r.awardedCount > 0) {
+            console.log(`[finalize-all] Streak ${key}: ${r.awardedCount} users, +${r.totalBonus} фантиков`);
+          } else if (r) {
+            console.log(`[finalize-all] Streak ${key}: нет серий (все матчи дня не завершены или уже обработан)`);
+          }
+        } catch (e) {
+          console.error(`[finalize-all] Streak ${key} failed:`, e.message);
+        }
+      }
+
+      console.log(`✅ [finalize-all] DONE ${scopeLabel}: ${processed} матчей, ${errors} ошибок, ${matchdays.size} matchday`);
+    } catch (e) {
+      console.error('❌ [finalize-all] FATAL:', e);
+    }
+  })();
 }));
 
 // ---- Existing endpoints ----
