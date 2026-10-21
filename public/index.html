@@ -2,424 +2,82 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>UCL Predictor</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
-    :root {
-      --bg: #f5f5f7;
-      --card: #ffffff;
-      --text: #171717;
-      --muted: #6e6e73;
-      --line: #e5e5ea;
-      --blue: #007aff;
-      --green: #34c759;
-      --orange: #ff9500;
-      --red: #ff3b30;
-      --purple: #5856d6;
-    }
-
-    * { box-sizing: border-box; }
-
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      margin: 0;
-      padding: 10px 10px calc(20px + env(safe-area-inset-bottom));
-      background: var(--bg);
-      color: var(--text);
-    }
-
-    button, input { font: inherit; }
-
-    .logo {
-      width: 100%;
-      max-width: 200px;
-      display: block;
-      margin: 4px auto 12px;
-    }
-
-    .nav {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 6px;
-      margin-bottom: 16px;
-      position: sticky;
-      top: 0;
-      z-index: 20;
-      padding: 6px 0;
-      background: rgba(245,245,247,.94);
-      backdrop-filter: blur(10px);
-    }
-
-    .nav button {
-      min-width: 0;
-      padding: 10px 6px;
-      background: var(--blue);
-      color: white;
-      border: none;
-      border-radius: 9px;
-      cursor: pointer;
-      font-size: 13px;
-      font-weight: 600;
-    }
-
-    h2, h3, h4 { margin-top: 0; }
-
-    .section-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      margin-bottom: 12px;
-    }
-
-    .section-header h2 { margin: 0; }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      padding: 5px 9px;
-      border-radius: 999px;
-      background: #e8eefc;
-      color: #2354a5;
-      font-size: 12px;
-      font-weight: 700;
-      white-space: nowrap;
-    }
-
-    .match-card,
-    .prediction-item,
-    .past-day {
-      background: var(--card);
-      border-radius: 12px;
-      padding: 13px;
-      margin-bottom: 10px;
-      box-shadow: 0 2px 8px rgba(0,0,0,.05);
-    }
-
-    .finished-match {
-      box-shadow: none;
-      border: 1px solid var(--line);
-    }
-
-    .match-title,
-    .prediction-item-title {
-      font-size: 16px;
-      font-weight: 700;
-      line-height: 1.3;
-    }
-
-    .vs { color: var(--muted); font-weight: 500; }
-    .muted { color: var(--muted); font-size: 13px; margin-top: 4px; }
-
-    .status {
-      display: inline-block;
-      margin-top: 7px;
-      font-size: 12px;
-      font-weight: 700;
-      padding: 4px 7px;
-      border-radius: 6px;
-      background: #ececf1;
-    }
-
-    .status-live { background: #ffe4e1; color: #a32018; }
-    .status-scheduled { background: #e8f2ff; color: #145da0; }
-    .status-finished { background: #e9f8ed; color: #1d6b35; }
-
-    .check-mark { color: var(--green); margin-left: 4px; }
-
-    .score-line,
-    .prediction-line,
-    .result-line {
-      margin-top: 6px;
-    }
-
-    .match-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 7px;
-      margin-top: 10px;
-    }
-
-    .primary-button,
-    .secondary-button,
-    .past-toggle {
-      border: none;
-      border-radius: 8px;
-      padding: 9px 13px;
-      cursor: pointer;
-      font-weight: 650;
-    }
-
-    .primary-button { background: var(--green); color: white; }
-    .secondary-button { background: #e9e9ee; color: #222; }
-
-    .past-toggle {
-      width: 100%;
-      margin: 10px 0;
-      background: #fff;
-      color: var(--blue);
-      border: 1px solid #d9e6ff;
-    }
-
-    .full-width { width: 100%; }
-    .hidden { display: none !important; }
-
-    .past-day {
-      padding: 10px;
-      background: #efeff4;
-      box-shadow: none;
-    }
-
-    .past-day > h3 {
-      margin: 4px 3px 10px;
-      text-transform: capitalize;
-      font-size: 15px;
-    }
-
-    .filter-bar {
-      display: flex;
-      gap: 6px;
-      overflow-x: auto;
-      padding-bottom: 7px;
-      margin-bottom: 10px;
-    }
-
-    .filter-bar button {
-      flex: 0 0 auto;
-      border: 1px solid #d8d8de;
-      background: white;
-      border-radius: 999px;
-      padding: 7px 11px;
-      cursor: pointer;
-      color: #333;
-      font-size: 13px;
-    }
-
-    .filter-bar button.active {
-      background: var(--blue);
-      color: white;
-      border-color: var(--blue);
-    }
-
-    .prediction-exact {
-      border: 1px solid #bde7c8;
-      background: #f5fff7;
-    }
-
-    .responsive-table {
-      overflow-x: auto;
-      -webkit-overflow-scrolling: touch;
-      border-radius: 10px;
-      background: white;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      min-width: 580px;
-      background: white;
-    }
-
-    th, td {
-      padding: 9px 8px;
-      border-bottom: 1px solid var(--line);
-      text-align: left;
-      white-space: nowrap;
-      font-size: 13px;
-    }
-
-    th {
-      font-size: 12px;
-      color: var(--muted);
-      background: #fafafa;
-      position: sticky;
-      top: 0;
-      z-index: 1;
-    }
-
-    .standings-table th:first-child,
-    .standings-table td:first-child {
-      position: sticky;
-      left: 0;
-      background: white;
-      z-index: 2;
-    }
-
-    .standings-table th:nth-child(2),
-    .standings-table td:nth-child(2) {
-      position: sticky;
-      left: 38px;
-      background: white;
-      z-index: 2;
-      box-shadow: 3px 0 5px rgba(0,0,0,.04);
-    }
-
-    .table-sort,
-    .link-button,
-    .metric-button,
-    .icon-button {
-      border: none;
-      background: none;
-      padding: 0;
-      cursor: pointer;
-      color: inherit;
-    }
-
-    .table-sort {
-      font-size: inherit;
-      font-weight: 700;
-      color: #4c4c52;
-    }
-
-    .link-button {
-      color: var(--blue);
-      font-weight: 700;
-      text-decoration: underline;
-      text-decoration-style: dotted;
-      text-underline-offset: 3px;
-    }
-
-    .metric-button {
-      min-width: 28px;
-      padding: 5px 7px;
-      border-radius: 7px;
-      background: #f1f1f5;
-      font-weight: 700;
-    }
-
-    .metric-button:hover { background: #e6efff; color: var(--blue); }
-
-    .standings-hint {
-      font-size: 12px;
-      color: var(--muted);
-      margin: -4px 0 10px;
-    }
-
-    .empty-state,
-    .loading {
-      padding: 18px;
-      text-align: center;
-      color: var(--muted);
-      background: white;
-      border-radius: 12px;
-    }
-
-    .empty-state.compact { padding: 12px; }
-    .empty-state.error { color: #a32018; background: #fff2f1; }
-
-    .modal-overlay {
-      position: fixed;
-      inset: 0;
-      z-index: 1000;
-      background: rgba(0,0,0,.55);
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      padding: 14px;
-    }
-
-    .modal-card {
-      width: 100%;
-      max-width: 520px;
-      max-height: 88vh;
-      overflow: auto;
-      background: white;
-      border-radius: 14px;
-      padding: 15px;
-      box-shadow: 0 20px 60px rgba(0,0,0,.25);
-    }
-
-    .modal-header {
-      display: flex;
-      align-items: start;
-      justify-content: space-between;
-      gap: 10px;
-      margin-bottom: 12px;
-    }
-
-    .modal-header h3 {
-      margin: 0;
-      font-size: 18px;
-    }
-
-    .icon-button {
-      width: 32px;
-      height: 32px;
-      border-radius: 50%;
-      background: #efeff4;
-      font-size: 22px;
-      line-height: 1;
-    }
-
-    .modal-bottom-close {
-      width: 100%;
-      margin-top: 12px;
-    }
-
-    .modal-match-name {
-      text-align: center;
-      font-weight: 700;
-      margin-bottom: 14px;
-    }
-
-    .score-inputs {
-      display: grid;
-      grid-template-columns: 1fr auto 1fr;
-      gap: 8px;
-      align-items: end;
-      margin-bottom: 15px;
-    }
-
-    .score-inputs label {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      font-size: 12px;
-      color: var(--muted);
-      text-align: center;
-    }
-
-    .score-inputs input {
-      width: 100%;
-      min-width: 0;
-      padding: 10px;
-      border: 1px solid #d7d7dc;
-      border-radius: 8px;
-      text-align: center;
-      font-size: 18px;
-    }
-
-    .score-separator {
-      font-size: 22px;
-      font-weight: 700;
-      padding-bottom: 8px;
-    }
-
-    .events-block {
-      margin-top: 14px;
-      padding-top: 10px;
-      border-top: 1px solid var(--line);
-    }
-
-    .events-block ul { padding-left: 20px; }
-
-    @media (max-width: 420px) {
-      body { padding-left: 7px; padding-right: 7px; }
-      .nav button { font-size: 12px; }
-      .match-card, .prediction-item { padding: 11px; }
-      .standings-table-wrap { margin-left: -7px; margin-right: -7px; border-radius: 0; }
-    }
+    :root { --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --muted: #94a3b8; --primary: #3b82f6; --success: #10b981; --danger: #ef4444; --border: #334155; }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    body { background: var(--bg); color: var(--text); padding-bottom: 80px; }
+    .nav-bar { position: fixed; bottom: 0; left: 0; right: 0; background: var(--card); display: flex; justify-content: space-around; padding: 12px 0; border-top: 1px solid var(--border); z-index: 100; }
+    .nav-item { background: none; border: none; color: var(--muted); font-size: 14px; font-weight: 500; cursor: pointer; padding: 8px 12px; border-radius: 8px; transition: all 0.2s; }
+    .nav-item.active, .nav-item:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+    #app { padding: 16px; max-width: 600px; margin: 0 auto; }
+    .section-header { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+    .section-header h2 { font-size: 20px; }
+    .badge { background: var(--primary); color: white; font-size: 12px; padding: 2px 8px; border-radius: 12px; }
+    .loading, .empty-state { text-align: center; padding: 40px 20px; color: var(--muted); }
+    .empty-state.error { color: var(--danger); }
+    .empty-state.compact { padding: 20px; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .match-card, .prediction-item { background: var(--card); border-radius: 12px; padding: 14px; margin-bottom: 12px; border: 1px solid var(--border); }
+    .match-title { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
+    .vs { color: var(--muted); font-weight: 400; margin: 0 4px; }
+    .check-mark { color: var(--success); margin-left: 6px; }
+    .status { font-size: 12px; font-weight: 500; margin-top: 6px; }
+    .status-scheduled { color: var(--primary); }
+    .status-live { color: var(--success); }
+    .status-finished { color: var(--muted); }
+    .score-line, .prediction-line, .result-line { font-size: 14px; margin-top: 6px; }
+    .match-actions { display: flex; gap: 8px; margin-top: 10px; }
+    button { cursor: pointer; border: none; border-radius: 8px; font-weight: 500; transition: opacity 0.2s; }
+    button:hover { opacity: 0.85; }
+    .primary-button { background: var(--primary); color: white; padding: 10px 16px; }
+    .secondary-button { background: rgba(255,255,255,0.1); color: var(--text); padding: 10px 16px; }
+    .full-width { width: 100%; margin-top: 12px; }
+    .filter-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+    .filter-bar button { padding: 8px 12px; font-size: 13px; background: rgba(255,255,255,0.08); color: var(--muted); }
+    .filter-bar button.active { background: var(--primary); color: white; }
+    .standings-sort-bar { align-items: center; }
+    .responsive-table { overflow-x: auto; border-radius: 12px; border: 1px solid var(--border); background: var(--card); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 10px 8px; text-align: center; border-bottom: 1px solid var(--border); }
+    th { background: rgba(255,255,255,0.03); color: var(--muted); font-weight: 600; }
+    tr:last-child td { border-bottom: none; }
+    .table-sort { background: none; color: inherit; padding: 4px 6px; font-size: 13px; font-weight: 600; }
+    .link-button, .metric-button { background: none; border: none; color: var(--text); text-decoration: underline; cursor: pointer; padding: 2px 4px; }
+    .metric-button { text-decoration: none; font-weight: 600; color: var(--primary); }
+    .metric-button:hover { color: var(--success); }
+    .position-arrow { display: inline-block; margin-left: 4px; font-weight: bold; font-size: 11px; vertical-align: middle; }
+    .position-arrow.up { color: var(--success); }
+    .position-arrow.down { color: var(--danger); }
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 16px; }
+    .modal-card { background: var(--card); border-radius: 16px; width: 100%; max-width: 500px; max-height: 85vh; display: flex; flex-direction: column; overflow: hidden; }
+    .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 16px; border-bottom: 1px solid var(--border); }
+    .modal-header h3 { font-size: 16px; }
+    .icon-button { background: none; color: var(--muted); font-size: 20px; line-height: 1; }
+    .modal-body { padding: 16px; overflow-y: auto; flex: 1; }
+    .modal-bottom-close { margin: 0 16px 16px; }
+    .score-inputs { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 20px 0; }
+    .score-inputs label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+    .score-inputs input { width: 70px; padding: 10px; text-align: center; font-size: 18px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); }
+    .score-separator { font-size: 24px; color: var(--muted); }
+    .past-toggle { width: 100%; margin: 16px 0; background: rgba(255,255,255,0.05); color: var(--muted); }
+    .hidden { display: none; }
+    .past-day h3 { font-size: 14px; color: var(--muted); margin: 16px 0 8px; text-transform: capitalize; }
+    .prediction-exact { border-left: 3px solid var(--success); }
+    .chart-container { position: relative; height: 280px; width: 100%; }
+    .standings-hint { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
   </style>
 </head>
 <body>
-  <img class="logo" src="/logo.jpeg" alt="UCL Predictor">
-  <div class="nav">
-    <button id="nav-matches">Матчи</button>
-    <button id="nav-my-predictions">Мои прогнозы</button>
-    <button id="nav-standings">Таблица</button>
-  </div>
-  <main id="app"></main>
+  <div id="app"></div>
+  <nav class="nav-bar">
+    <button id="nav-matches" class="nav-item active">Матчи</button>
+    <button id="nav-my-predictions" class="nav-item">Мои прогнозы</button>
+    <button id="nav-standings" class="nav-item">Таблица</button>
+  </nav>
   <script src="app.js"></script>
 </body>
 </html>
