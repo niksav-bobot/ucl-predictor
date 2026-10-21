@@ -36,7 +36,17 @@ const ODDS_SPORT_KEY = process.env.ODDS_SPORT_KEY || 'soccer_uefa_champions_leag
 const ODDS_CACHE_TTL_MS = 10 * 60 * 1000;
 let oddsCache = { fetchedAt: 0, events: [] };
 
-const EXPECTED_COLUMNS = { Users: 12, Predictions: 9, Matches: 10, MatchEvents: 7 };
+const EXPECTED_COLUMNS = {
+  Users: 16,
+  Predictions: 11,
+  Matches: 10,
+  MatchEvents: 7,
+  FantikiTransactions: 7,
+  Duels: 9,
+  DuelBets: 7,
+  QuestsProgress: 5,
+  MatchdayBonuses: 7,
+};
 
 // ========== Telegram: режим webhook / polling ==========
 // USE_WEBHOOK=true  → принудительно webhook
@@ -49,7 +59,7 @@ const WEBHOOK_SECRET = crypto.createHash('sha256').update(`secret:${BOT_TOKEN ||
 const WEBHOOK_PATH = `/webhook/${crypto.createHash('sha256').update(`path:${BOT_TOKEN || 'none'}`).digest('hex').slice(0, 32)}`;
 
 // ========== Кэш Google Sheets + retry на 429 ==========
-const sheetCache = new Map(); // cacheKey -> { data, expiresAt }
+const sheetCache = new Map();
 const SHEET_CACHE_TTL_MS = 45 * 1000;
 
 async function sheetsRequestWithRetry(fn, maxRetries = 5) {
@@ -120,6 +130,26 @@ function rangeForRow(sheet, idx, cols) { return `${quoteSheetName(sheet)}!A${idx
 function isDifferentRow(o, n, len) { for (let i = 0; i < len; i++) { if (String(o?.[i] ?? '').trim() !== String(n?.[i] ?? '').trim()) return true; } return false; }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// ========== Уровни (Stage 1) ==========
+function calculateLevel(totalEarned) {
+  const t = toNum(totalEarned, 0);
+  if (t >= 5000) return 5; // Профи
+  if (t >= 2000) return 4; // Снайпер
+  if (t >= 1000) return 3; // Аналитик
+  if (t >= 500)  return 2; // Прогнозист
+  if (t >= 100)  return 1; // Новичок
+  return 0;
+}
+function levelToName(level) {
+  return ['Без уровня', 'Новичок', 'Прогнозист', 'Аналитик', 'Снайпер', 'Профи'][level] || 'Без уровня';
+}
+function getLevelBonus(level) {
+  return [0, 0, 0.05, 0.10, 0.15, 0.25][level] || 0;
+}
+function getLevelThreshold(level) {
+  return [0, 100, 500, 1000, 2000, 5000][level] || 0;
+}
+
 // ========== Google Sheets API (запись) ==========
 async function appendRows(sheet, rows) {
   if (!rows.length) return;
@@ -153,6 +183,7 @@ async function batchWriteRows(sheet, updates) {
   invalidateSheetCache(sheet);
 }
 async function writeRow(sheet, idx, values) { await batchWriteRows(sheet, [{ rowIndex: idx, values }]); }
+
 const sheetIdCache = {};
 async function getSheetIdByName(name) {
   if (sheetIdCache[name] !== undefined) return sheetIdCache[name];
@@ -164,6 +195,7 @@ async function getSheetIdByName(name) {
   sheetIdCache[name] = sheet.properties.sheetId;
   return sheetIdCache[name];
 }
+
 async function deleteRowsByRowIndices(sheet, indexes) {
   const unique = [...new Set(indexes.map(Number).filter(Number.isFinite))].sort((a, b) => b - a);
   if (!unique.length) return;
@@ -182,6 +214,173 @@ async function deleteRowsByRowIndices(sheet, indexes) {
     );
   }
   invalidateSheetCache(sheet);
+}
+
+// ========== Миграция: создание/расширение листов ==========
+async function setupSheet(sheetName, expectedHeaders) {
+  let exists = true;
+  try {
+    await sheetsRequestWithRetry(() =>
+      sheets.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID,
+        range: `${quoteSheetName(sheetName)}!A1:A1`,
+      })
+    );
+  } catch (err) {
+    exists = false;
+  }
+
+  if (!exists) {
+    await sheetsRequestWithRetry(() =>
+      sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: {
+          requests: [{ addSheet: { properties: { title: sheetName } } }],
+        },
+      })
+    );
+    delete sheetIdCache[sheetName];
+    await sheetsRequestWithRetry(() =>
+      sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: `${quoteSheetName(sheetName)}!A1:${columnLetter(expectedHeaders.length)}1`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [expectedHeaders] },
+      })
+    );
+    invalidateSheetCache(sheetName);
+    return { created: true, updated: false };
+  }
+
+  const res = await sheetsRequestWithRetry(() =>
+    sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${quoteSheetName(sheetName)}!A1:AZ1`,
+    })
+  );
+  const currentHeaders = res.data.values?.[0] || [];
+  const maxLen = Math.max(currentHeaders.length, expectedHeaders.length);
+  const merged = [];
+  for (let i = 0; i < maxLen; i++) merged.push(currentHeaders[i] ?? expectedHeaders[i] ?? '');
+
+  const changed = merged.length !== currentHeaders.length
+    || merged.some((h, i) => h !== (currentHeaders[i] ?? ''));
+  if (!changed) return { created: false, updated: false };
+
+  await sheetsRequestWithRetry(() =>
+    sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `${quoteSheetName(sheetName)}!A1:${columnLetter(merged.length)}1`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [merged] },
+    })
+  );
+  invalidateSheetCache(sheetName);
+  return { created: false, updated: true, headers: merged };
+}
+
+async function migrateFantiki() {
+  const result = { sheetsCreated: [], columnsUpdated: [], usersInitialized: 0, predictionsInitialized: 0 };
+
+  const newSheets = [
+    { name: 'FantikiTransactions', headers: ['tx_id', 'user_id', 'amount', 'reason', 'ref_id', 'created_at', 'balance_after'] },
+    { name: 'Duels', headers: ['duel_id', 'match_id', 'creator_id', 'stake', 'status', 'created_at', 'settled_at', 'pot', 'winner_ids'] },
+    { name: 'DuelBets', headers: ['bet_id', 'duel_id', 'user_id', 'predicted_home', 'predicted_away', 'joined_at', 'result'] },
+    { name: 'QuestsProgress', headers: ['user_id', 'quest_id', 'matchday_key', 'completed_at', 'awarded'] },
+    { name: 'MatchdayBonuses', headers: ['bonus_id', 'matchday_key', 'type', 'user_id', 'place', 'amount', 'awarded_at'] },
+  ];
+  for (const s of newSheets) {
+    const r = await setupSheet(s.name, s.headers);
+    if (r.created) result.sheetsCreated.push(s.name);
+  }
+
+  const usersHeaders = ['user_id', 'username', 'display_name', 'registration_date', 'points', 'total_predictions', 'successful', 'exact', 'difference', 'draws', 'outcomes', 'misses', 'fantiki_balance', 'total_earned_season', 'level', 'historical_earned'];
+  const predHeaders = ['prediction_id', 'user_id', 'match_id', 'predicted_home', 'predicted_away', 'created_at', 'updated_at', 'points', 'prediction_type', 'fantiki_awarded', 'is_starred'];
+
+  const uR = await setupSheet('Users', usersHeaders);
+  if (uR.updated) result.columnsUpdated.push('Users');
+  const pR = await setupSheet('Predictions', predHeaders);
+  if (pR.updated) result.columnsUpdated.push('Predictions');
+
+  const usersData = await getSheetData('Users', 'A:P');
+  const userUpdates = [];
+  usersData.forEach((row, idx) => {
+    if (!isDataRow(row, 'user_id')) return;
+    const padded = padRow(row, EXPECTED_COLUMNS.Users);
+    let changed = false;
+    if (padded[12] === '' || padded[12] == null) { padded[12] = 0; changed = true; }
+    if (padded[13] === '' || padded[13] == null) { padded[13] = 0; changed = true; }
+    if (padded[14] === '' || padded[14] == null) { padded[14] = 0; changed = true; }
+    if (padded[15] === '' || padded[15] == null) { padded[15] = 0; changed = true; }
+    if (changed) { userUpdates.push({ rowIndex: idx, values: padded }); result.usersInitialized++; }
+  });
+  if (userUpdates.length) await batchWriteRows('Users', userUpdates);
+
+  const predData = await getSheetData('Predictions', 'A:K');
+  const predUpdates = [];
+  predData.forEach((row, idx) => {
+    if (!isDataRow(row, 'prediction_id')) return;
+    const padded = padRow(row, EXPECTED_COLUMNS.Predictions);
+    let changed = false;
+    if (padded[9] === '' || padded[9] == null) { padded[9] = 0; changed = true; }
+    if (padded[10] === '' || padded[10] == null) { padded[10] = 'FALSE'; changed = true; }
+    if (changed) { predUpdates.push({ rowIndex: idx, values: padded }); result.predictionsInitialized++; }
+  });
+  if (predUpdates.length) await batchWriteRows('Predictions', predUpdates);
+
+  return result;
+}
+
+// ========== Начисление фантиков ==========
+async function awardFantiki(userId, amount, reason, refId = '') {
+  const amt = toNum(amount, 0);
+  if (!userId || !amt) return { success: false, error: 'Invalid params' };
+  const uid = String(userId).trim();
+
+  const usersData = await getSheetData('Users', 'A:P');
+  const userIndex = usersData.findIndex(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
+  if (userIndex === -1) return { success: false, error: 'User not found' };
+
+  const user = padRow(usersData[userIndex], EXPECTED_COLUMNS.Users);
+  const oldBalance = toNum(user[12], 0);
+  const oldTotalEarned = toNum(user[13], 0);
+  const newBalance = Math.max(0, oldBalance + amt);
+  const newTotalEarned = amt > 0 ? oldTotalEarned + amt : oldTotalEarned;
+  const newLevel = calculateLevel(newTotalEarned);
+
+  user[12] = newBalance;
+  user[13] = newTotalEarned;
+  user[14] = newLevel;
+
+  await writeRow('Users', userIndex, user);
+
+  const txId = `tx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  await appendRows('FantikiTransactions', [[
+    txId, uid, amt, String(reason || ''), String(refId || ''), new Date().toISOString(), newBalance,
+  ]]);
+
+  return { success: true, txId, newBalance, newTotalEarned, level: newLevel, levelName: levelToName(newLevel) };
+}
+
+async function getBalance(userId) {
+  const uid = String(userId || '').trim();
+  if (!uid) return null;
+  const usersData = await getSheetData('Users', 'A:P');
+  const row = usersData.find(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
+  if (!row) return null;
+  const p = padRow(row, EXPECTED_COLUMNS.Users);
+  const total = toNum(p[13], 0);
+  const level = toNum(p[14], 0) || calculateLevel(total);
+  return {
+    userId: uid,
+    balance: toNum(p[12], 0),
+    totalEarnedSeason: total,
+    level,
+    levelName: levelToName(level),
+    levelBonus: getLevelBonus(level),
+    nextLevelAt: level < 5 ? getLevelThreshold(level + 1) : null,
+    historicalEarned: toNum(p[15], 0),
+  };
 }
 
 // ========== Логика последних прогнозов ==========
@@ -371,8 +570,8 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
   if (ah === null || aa === null) return 0;
   const matchIdStr = String(matchId).trim();
   const { Predictions: predictionsData, Users: usersData } = await batchGetSheets([
-    { sheet: 'Predictions', range: 'A:Z' },
-    { sheet: 'Users', range: 'A:Z' },
+    { sheet: 'Predictions', range: 'A:K' },
+    { sheet: 'Users', range: 'A:P' },
   ]);
   const latestMap = getLatestPredictionMap(predictionsData);
   const predictionUpdates = [];
@@ -546,8 +745,8 @@ async function updateMatchEventsForFinished() {
 
 async function recalculateAll() {
   const { Users: usersData, Predictions: predictionsData, Matches: matchesData } = await batchGetSheets([
-    { sheet: 'Users', range: 'A:Z' },
-    { sheet: 'Predictions', range: 'A:Z' },
+    { sheet: 'Users', range: 'A:P' },
+    { sheet: 'Predictions', range: 'A:K' },
     { sheet: 'Matches', range: 'A:J' },
   ]);
   const finishedMatches = new Map();
@@ -630,7 +829,7 @@ async function recalculateAll() {
 async function getUserPredictionsResponse(userId, query = {}) {
   const { Matches: matchesData, Predictions: predictionsData } = await batchGetSheets([
     { sheet: 'Matches', range: 'A:J' },
-    { sheet: 'Predictions', range: 'A:Z' },
+    { sheet: 'Predictions', range: 'A:K' },
   ]);
   const matches = matchesData.filter(r => isDataRow(r, 'match_id'));
   const userPredictions = getLatestPredictionsForUser(predictionsData, userId);
@@ -669,18 +868,18 @@ async function processTelegramMessage(msg) {
   const chatId = msg.chat?.id, from = msg.from, text = msg.text || '';
   if (!text || !from) return;
   const userId = String(from.id), username = from.username || '';
-  const usersData = await getSheetData('Users', 'A:Z');
+  const usersData = await getSheetData('Users', 'A:P');
   const existingUserIndex = usersData.findIndex(row => isDataRow(row, 'user_id') && String(row[0]).trim() === userId);
   if (existingUserIndex === -1) {
     let displayName = from.first_name || username || 'User';
     if (from.last_name && from.first_name) displayName = `${from.first_name} ${from.last_name}`;
-    await appendRows('Users', [[userId, username, displayName, new Date().toISOString(), 0, 0, 0, 0, 0, 0, 0, 0]]);
+    await appendRows('Users', [[userId, username, displayName, new Date().toISOString(), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]);
   }
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   if (!lines.length) return;
   const matchesData = await getSheetData('Matches', 'A:J');
   const matches = matchesData.filter(row => isDataRow(row, 'match_id'));
-  let predictionsData = await getSheetData('Predictions', 'A:Z');
+  let predictionsData = await getSheetData('Predictions', 'A:K');
   let savedCount = 0;
   for (const line of lines) {
     const parsed = parsePredictionText(line);
@@ -694,7 +893,7 @@ async function processTelegramMessage(msg) {
     predictionsData.forEach((row, idx) => { if (isDataRow(row, 'prediction_id') && String(row[1]).trim() === userId && String(row[2]).trim() === matchId) existingIndexes.push(idx); });
     await deleteRowsByRowIndices('Predictions', existingIndexes);
     predictionsData = predictionsData.filter((_, i) => !existingIndexes.includes(i));
-    await appendRows('Predictions', [[`${userId}_${matchId}`, userId, matchId, parsed.homeScore, parsed.awayScore, new Date().toISOString(), new Date().toISOString(), 0, '']]);
+    await appendRows('Predictions', [[`${userId}_${matchId}`, userId, matchId, parsed.homeScore, parsed.awayScore, new Date().toISOString(), new Date().toISOString(), 0, '', 0, 'FALSE']]);
     savedCount++;
   }
   if (savedCount > 0) await callTelegram('sendMessage', { chat_id: chatId, text: `✅ Сохранено прогнозов: ${savedCount}` });
@@ -755,10 +954,51 @@ app.post(WEBHOOK_PATH, (req, res) => {
 
 // ========== API-маршруты ==========
 
+// ---- Фантики (Stage 1) ----
+app.get('/api/fantiki/balance/:userId', asyncHandler(async (req, res) => {
+  const userId = String(req.params.userId || '').trim();
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  const info = await getBalance(userId);
+  if (!info) return res.status(404).json({ error: 'User not found' });
+  res.json(info);
+}));
+
+app.get('/api/fantiki/transactions/:userId', asyncHandler(async (req, res) => {
+  const userId = String(req.params.userId || '').trim();
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  const limit = Math.min(Math.max(toNum(req.query.limit, 50), 1), 200);
+  const txData = await getSheetData('FantikiTransactions', 'A:G');
+  const userTx = txData
+    .filter(r => isDataRow(r, 'tx_id') && String(r[1] || '').trim() === userId)
+    .slice(-limit)
+    .reverse();
+  res.json(userTx.map(r => ({
+    id: r[0] || '',
+    amount: toNum(r[2], 0),
+    reason: r[3] || '',
+    refId: r[4] || '',
+    createdAt: r[5] || '',
+    balanceAfter: toNum(r[6], 0),
+  })));
+}));
+
+app.post('/api/admin/migrate-fantiki', requireAdmin, asyncHandler(async (req, res) => {
+  try { res.json({ success: true, ...(await migrateFantiki()) }); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
+}));
+
+app.post('/api/admin/grant-fantiki', requireAdmin, asyncHandler(async (req, res) => {
+  const { userId, amount, reason } = req.body;
+  if (!userId || amount == null) return res.status(400).json({ error: 'userId and amount required' });
+  const result = await awardFantiki(userId, Number(amount), reason || 'admin_grant', '');
+  res.json(result);
+}));
+
+// ---- Standings ----
 app.get('/api/standings-history', asyncHandler(async (req, res) => {
   const { Matches: matchesData, Predictions: predictionsData } = await batchGetSheets([
     { sheet: 'Matches', range: 'A:J' },
-    { sheet: 'Predictions', range: 'A:Z' },
+    { sheet: 'Predictions', range: 'A:K' },
   ]);
   const finishedMatches = matchesData.filter(row => isDataRow(row, 'match_id') && String(row[5] || '').trim() === 'finished').map(row => ({ matchId: String(row[0]).trim(), timestamp: new Date(row[8] || row[4] || '').getTime() || 0 })).sort((a, b) => a.timestamp - b.timestamp);
   if (!finishedMatches.length) return res.json({ previousPositions: {}, currentPositions: {} });
@@ -787,7 +1027,7 @@ app.get('/api/user-points-history/:userId', asyncHandler(async (req, res) => {
   if (!userId) return res.status(400).json({ error: 'userId required' });
   const { Matches: matchesData, Predictions: predictionsData } = await batchGetSheets([
     { sheet: 'Matches', range: 'A:J' },
-    { sheet: 'Predictions', range: 'A:Z' },
+    { sheet: 'Predictions', range: 'A:K' },
   ]);
   const matchById = new Map();
   matchesData.forEach(row => { if (isDataRow(row, 'match_id')) matchById.set(String(row[0]).trim(), row); });
@@ -814,8 +1054,8 @@ app.get('/api/user-points-history/:userId', asyncHandler(async (req, res) => {
 app.get('/api/standings-last-round', asyncHandler(async (req, res) => {
   const { Matches: matchesData, Predictions: predictionsData, Users: usersData } = await batchGetSheets([
     { sheet: 'Matches', range: 'A:J' },
-    { sheet: 'Predictions', range: 'A:Z' },
-    { sheet: 'Users', range: 'A:Z' },
+    { sheet: 'Predictions', range: 'A:K' },
+    { sheet: 'Users', range: 'A:P' },
   ]);
   const finishedMatches = matchesData.filter(row => isDataRow(row, 'match_id') && String(row[5] || '').trim() === 'finished').map(row => ({ matchId: String(row[0]).trim(), timestamp: new Date(row[8] || row[4] || '').getTime() || 0 })).filter(m => m.timestamp > 0).sort((a, b) => b.timestamp - a.timestamp);
   if (!finishedMatches.length) return res.json([]);
@@ -863,12 +1103,12 @@ app.post('/api/auth', asyncHandler(async (req, res) => {
   if (!user?.id && ALLOW_PLAIN_USER_ID && isNotEmpty(req.body.userId)) user = { id: req.body.userId, username: req.body.username || '', first_name: req.body.firstName || '', last_name: req.body.lastName || '' };
   if (!user?.id) return res.status(400).json({ error: 'userId required' });
   const userId = String(user.id).trim();
-  const usersData = await getSheetData('Users', 'A:Z');
+  const usersData = await getSheetData('Users', 'A:P');
   const existingUser = usersData.find(row => isDataRow(row, 'user_id') && String(row[0]).trim() === userId);
   if (!existingUser) {
     let displayName = user.first_name || user.username || 'User';
     if (user.last_name && user.first_name) displayName = `${user.first_name} ${user.last_name}`;
-    await appendRows('Users', [[userId, user.username || '', displayName, new Date().toISOString(), 0, 0, 0, 0, 0, 0, 0, 0]]);
+    await appendRows('Users', [[userId, user.username || '', displayName, new Date().toISOString(), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]);
     return res.json({ userId, displayName });
   }
   return res.json({ userId, displayName: existingUser[2] || existingUser[1] || 'User' });
@@ -878,7 +1118,7 @@ app.get('/api/matches', asyncHandler(async (req, res) => {
   const userId = req.query.userId ? String(req.query.userId).trim() : null;
   const { Matches: matchesData, Predictions: predictionsData } = await batchGetSheets([
     { sheet: 'Matches', range: 'A:J' },
-    { sheet: 'Predictions', range: 'A:Z' },
+    { sheet: 'Predictions', range: 'A:K' },
   ]);
   const matches = matchesData.filter(row => isDataRow(row, 'match_id'));
   const userPredictions = userId ? getLatestPredictionsForUser(predictionsData, userId) : [];
@@ -920,11 +1160,11 @@ app.post('/api/predictions', asyncHandler(async (req, res) => {
   if (!Number.isFinite(kickoff.getTime()) || Date.now() >= kickoff.getTime()) return res.status(400).json({ error: 'Match already started' });
   const pHome = toScore(predictedHome), pAway = toScore(predictedAway);
   if (pHome === null || pAway === null || pHome < 0 || pAway < 0 || pHome > 20 || pAway > 20) return res.status(400).json({ error: 'Invalid score' });
-  const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const predictionsData = await getSheetData('Predictions', 'A:K');
   const existingIndexes = [];
   predictionsData.forEach((row, rowIndex) => { if (isDataRow(row, 'prediction_id') && String(row[1]).trim() === String(userId).trim() && String(row[2]).trim() === String(matchId).trim()) existingIndexes.push(rowIndex); });
   await deleteRowsByRowIndices('Predictions', existingIndexes);
-  await appendRows('Predictions', [[`${userId}_${matchId}`, userId, matchId, pHome, pAway, new Date().toISOString(), new Date().toISOString(), 0, '']]);
+  await appendRows('Predictions', [[`${userId}_${matchId}`, userId, matchId, pHome, pAway, new Date().toISOString(), new Date().toISOString(), 0, '', 0, 'FALSE']]);
   res.json({ success: true });
 }));
 
@@ -946,8 +1186,8 @@ app.post('/api/admin/match-result', requireAdmin, asyncHandler(async (req, res) 
 app.get('/api/match-predictions/:matchId', asyncHandler(async (req, res) => {
   const matchId = String(req.params.matchId || '').trim();
   const { Predictions: predictionsData, Users: usersData } = await batchGetSheets([
-    { sheet: 'Predictions', range: 'A:Z' },
-    { sheet: 'Users', range: 'A:Z' },
+    { sheet: 'Predictions', range: 'A:K' },
+    { sheet: 'Users', range: 'A:P' },
   ]);
   const latestMap = getLatestPredictionMap(predictionsData);
   const matchPredictions = [...latestMap.values()].map(item => predictionsData[item.idx]).filter(row => row && String(row[2] || '').trim() === matchId);
@@ -994,9 +1234,9 @@ app.get('/api/match-odds/:matchId', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/standings', asyncHandler(async (req, res) => {
-  const usersData = await getSheetData('Users', 'A:Z');
+  const usersData = await getSheetData('Users', 'A:P');
   const users = usersData.filter(row => isDataRow(row, 'user_id'));
-  const table = users.map(row => ({ userId: String(row[0] || '').trim(), username: row[1] || '', displayName: row[2] || row[1] || 'User', registrationDate: row[3] || '', totalPoints: toNum(row[4], 0), successfulPredictions: toNum(row[6], 0), exactScores: toNum(row[7], 0), goalDifference: toNum(row[8], 0), draws: toNum(row[9], 0), outcomes: toNum(row[10], 0), misses: toNum(row[11], 0) })).filter(user => user.userId);
+  const table = users.map(row => ({ userId: String(row[0] || '').trim(), username: row[1] || '', displayName: row[2] || row[1] || 'User', registrationDate: row[3] || '', totalPoints: toNum(row[4], 0), successfulPredictions: toNum(row[6], 0), exactScores: toNum(row[7], 0), goalDifference: toNum(row[8], 0), draws: toNum(row[9], 0), outcomes: toNum(row[10], 0), misses: toNum(row[11], 0), fantikiBalance: toNum(row[12], 0), totalEarnedSeason: toNum(row[13], 0), level: toNum(row[14], 0), levelName: levelToName(toNum(row[14], 0)) })).filter(user => user.userId);
   const sortBy = String(req.query.sortBy || '').toLowerCase().trim();
   const requestedOrder = String(req.query.order || '').toLowerCase().trim();
   const sortableFields = { points: 'totalPoints', totalpoints: 'totalPoints', exact: 'exactScores', exactscores: 'exactScores', difference: 'goalDifference', goaldifference: 'goalDifference', draws: 'draws', outcomes: 'outcomes', misses: 'misses', successful: 'successfulPredictions', successfulpredictions: 'successfulPredictions' };
