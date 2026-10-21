@@ -1,11 +1,9 @@
 require('dotenv').config();
-
 const express = require('express');
 const { google } = require('googleapis');
 const crypto = require('crypto');
 
 const app = express();
-
 app.use(express.json());
 app.use(express.static('public'));
 
@@ -17,7 +15,6 @@ const auth = new google.auth.GoogleAuth({
   },
   scopes: ['https://www.googleapis.com/auth/spreadsheets'],
 });
-
 const sheets = google.sheets({ version: 'v4', auth });
 
 const SHEET_ID = process.env.GOOGLE_SHEET_ID;
@@ -37,1156 +34,292 @@ const ODDS_API_KEY = process.env.ODDS_API_KEY || '';
 const ODDS_API_BASE_URL = process.env.ODDS_API_BASE_URL || 'https://api.the-odds-api.com/v4';
 const ODDS_SPORT_KEY = process.env.ODDS_SPORT_KEY || 'soccer_uefa_champions_league';
 const ODDS_CACHE_TTL_MS = 10 * 60 * 1000;
+let oddsCache = { fetchedAt: 0, events: [] };
 
-let oddsCache = {
-  fetchedAt: 0,
-  events: [],
-};
-
-const EXPECTED_COLUMNS = {
-  Users: 12,
-  Predictions: 9,
-  Matches: 10,
-  MatchEvents: 7,
-};
+const EXPECTED_COLUMNS = { Users: 12, Predictions: 9, Matches: 10, MatchEvents: 7 };
 
 // ========== Вспомогательные функции ==========
-function isNotEmpty(value) {
-  return value !== null && value !== undefined && String(value).trim() !== '';
-}
-
-function toNum(value, fallback = 0) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function toScore(value) {
-  if (value === null || value === undefined || String(value).trim() === '') return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-function quoteSheetName(name) {
-  return `'${String(name).replace(/'/g, "''")}'`;
-}
-
-function columnLetter(index) {
-  let result = '';
-  let n = Math.max(1, Math.floor(index));
-
-  while (n > 0) {
-    const modulo = (n - 1) % 26;
-    result = String.fromCharCode(65 + modulo) + result;
-    n = Math.floor((n - 1) / 26);
-  }
-
-  return result;
-}
-
-function padRow(row, length) {
-  const safeLength = Math.max(0, Number(length) || 0);
-  return Array.from({ length: safeLength }, (_, index) => row?.[index] ?? '');
-}
-
-function isDataRow(row, headerValue) {
-  if (!Array.isArray(row) || row.length === 0) return false;
-
-  const first = row[0];
-  if (!isNotEmpty(first)) return false;
-
-  const firstStr = String(first).trim();
-
-  if (headerValue !== undefined && firstStr === String(headerValue).trim()) {
-    return false;
-  }
-
-  return true;
-}
-
-function rangeForRow(sheetName, rowIndex, columns) {
-  return `${quoteSheetName(sheetName)}!A${rowIndex + 1}:${columnLetter(columns)}${rowIndex + 1}`;
-}
-
-function isDifferentRow(oldRow, newRow, length) {
-  for (let i = 0; i < length; i++) {
-    const oldValue = oldRow?.[i] ?? '';
-    const newValue = newRow?.[i] ?? '';
-
-    if (String(oldValue).trim() !== String(newValue).trim()) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+function isNotEmpty(v) { return v !== null && v !== undefined && String(v).trim() !== ''; }
+function toNum(v, f = 0) { const n = Number(v); return Number.isFinite(n) ? n : f; }
+function toScore(v) { if (v === null || v === undefined || String(v).trim() === '') return null; const n = Number(v); return Number.isFinite(n) ? n : null; }
+function quoteSheetName(n) { return `'${String(n).replace(/'/g, "''")}'`; }
+function columnLetter(i) { let r = '', n = Math.max(1, Math.floor(i)); while (n > 0) { const m = (n - 1) % 26; r = String.fromCharCode(65 + m) + r; n = Math.floor((n - 1) / 26); } return r; }
+function padRow(row, len) { const l = Math.max(0, Number(len) || 0); return Array.from({ length: l }, (_, i) => row?.[i] ?? ''); }
+function isDataRow(row, header) { if (!Array.isArray(row) || !row.length) return false; const f = row[0]; if (!isNotEmpty(f)) return false; return header === undefined || String(f).trim() !== String(header).trim(); }
+function rangeForRow(sheet, idx, cols) { return `${quoteSheetName(sheet)}!A${idx + 1}:${columnLetter(cols)}${idx + 1}`; }
+function isDifferentRow(o, n, len) { for (let i = 0; i < len; i++) { if (String(o?.[i] ?? '').trim() !== String(n?.[i] ?? '').trim()) return true; } return false; }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ========== Google Sheets API ==========
-async function getSheetData(sheetName, range) {
-  const response = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${quoteSheetName(sheetName)}!${range}`,
-  });
-
-  return response.data.values || [];
+async function getSheetData(sheet, range) {
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${quoteSheetName(sheet)}!${range}` });
+  return res.data.values || [];
 }
-
-async function appendRows(sheetName, rows) {
+async function appendRows(sheet, rows) {
   if (!rows.length) return;
-
-  const expectedLength = EXPECTED_COLUMNS[sheetName] || Math.max(...rows.map(row => row.length));
-  const paddedRows = rows.map(row => padRow(row, expectedLength));
-
+  const len = EXPECTED_COLUMNS[sheet] || Math.max(...rows.map(r => r.length));
   await sheets.spreadsheets.values.append({
-    spreadsheetId: SHEET_ID,
-    range: `${quoteSheetName(sheetName)}!A:A`,
-    valueInputOption: 'RAW',
-    insertDataOption: 'INSERT_ROWS',
-    resource: {
-      values: paddedRows,
-    },
+    spreadsheetId: SHEET_ID, range: `${quoteSheetName(sheet)}!A:A`, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
+    resource: { values: rows.map(r => padRow(r, len)) },
   });
 }
-
-async function batchWriteRows(sheetName, updates) {
+async function batchWriteRows(sheet, updates) {
   if (!updates.length) return;
-
-  const expectedLength = EXPECTED_COLUMNS[sheetName] || 26;
-  const chunkSize = 200;
-
-  for (let i = 0; i < updates.length; i += chunkSize) {
-    const chunk = updates.slice(i, i + chunkSize).map(update => ({
-      range: rangeForRow(sheetName, update.rowIndex, expectedLength),
-      values: [padRow(update.values, expectedLength)],
-    }));
-
-    await sheets.spreadsheets.values.batchUpdate({
-      spreadsheetId: SHEET_ID,
-      requestBody: {
-        valueInputOption: 'RAW',
-        data: chunk,
-      },
-    });
+  const len = EXPECTED_COLUMNS[sheet] || 26;
+  for (let i = 0; i < updates.length; i += 200) {
+    const chunk = updates.slice(i, i + 200).map(u => ({ range: rangeForRow(sheet, u.rowIndex, len), values: [padRow(u.values, len)] }));
+    await sheets.spreadsheets.values.batchUpdate({ spreadsheetId: SHEET_ID, requestBody: { valueInputOption: 'RAW', data: chunk } });
   }
 }
-
-async function writeRow(sheetName, rowIndex, values) {
-  await batchWriteRows(sheetName, [{ rowIndex, values }]);
-}
-
+async function writeRow(sheet, idx, values) { await batchWriteRows(sheet, [{ rowIndex: idx, values }]); }
 const sheetIdCache = {};
-
-async function getSheetIdByName(sheetName) {
-  if (sheetIdCache[sheetName] !== undefined) {
-    return sheetIdCache[sheetName];
-  }
-
-  const response = await sheets.spreadsheets.get({
-    spreadsheetId: SHEET_ID,
-    fields: 'sheets.properties',
-  });
-
-  const sheet = response.data.sheets?.find(item => item.properties?.title === sheetName);
-
-  if (!sheet) {
-    throw new Error(`Sheet not found: ${sheetName}`);
-  }
-
-  sheetIdCache[sheetName] = sheet.properties.sheetId;
-  return sheetIdCache[sheetName];
+async function getSheetIdByName(name) {
+  if (sheetIdCache[name] !== undefined) return sheetIdCache[name];
+  const res = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID, fields: 'sheets.properties' });
+  const sheet = res.data.sheets?.find(s => s.properties?.title === name);
+  if (!sheet) throw new Error(`Sheet not found: ${name}`);
+  sheetIdCache[name] = sheet.properties.sheetId;
+  return sheetIdCache[name];
 }
-
-async function deleteRow(sheetName, idValue) {
-  const data = await getSheetData(sheetName, 'A:Z');
-
-  const rowIndex = data.findIndex(row => {
-    return isNotEmpty(row[0]) && String(row[0]).trim() === String(idValue).trim();
-  });
-
-  if (rowIndex === -1) return;
-
-  const sheetId = await getSheetIdByName(sheetName);
-
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId: SHEET_ID,
-    requestBody: {
-      requests: [
-        {
-          deleteDimension: {
-            range: {
-              sheetId,
-              dimension: 'ROWS',
-              startIndex: rowIndex,
-              endIndex: rowIndex + 1,
-            },
-          },
-        },
-      ],
-    },
-  });
-}
-
-// ========== Дополнительные помощники для последних прогнозов ==========
-function getLatestPredictionMap(predictionsData) {
-  const latest = new Map();
-
-  predictionsData.forEach((row, rowIndex) => {
-    if (!isDataRow(row, 'prediction_id')) return;
-
-    const userId = String(row[1] || '').trim();
-    const matchId = String(row[2] || '').trim();
-
-    if (!userId || !matchId) return;
-
-    const key = `${userId}|${matchId}`;
-
-    const updatedTime =
-      Date.parse(row[6] || '') ||
-      Date.parse(row[5] || '') ||
-      0;
-
-    const current = latest.get(key);
-
-    if (
-      !current ||
-      updatedTime > current.updatedTime ||
-      (updatedTime === current.updatedTime && rowIndex > current.rowIndex)
-    ) {
-      latest.set(key, {
-        rowIndex,
-        updatedTime,
-        userId,
-        matchId,
-      });
-    }
-  });
-
-  return latest;
-}
-
-function getLatestPredictionsForUser(predictionsData, userId) {
-  const latestMap = getLatestPredictionMap(predictionsData);
-  const userIdStr = String(userId || '').trim();
-  const rows = [];
-
-  for (const item of latestMap.values()) {
-    const row = predictionsData[item.rowIndex];
-
-    if (row && String(row[1] || '').trim() === userIdStr) {
-      rows.push(row);
-    }
-  }
-
-  return rows;
-}
-
-async function deleteRowsByRowIndices(sheetName, rowIndexes) {
-  const unique = [...new Set(rowIndexes.map(Number).filter(Number.isFinite))].sort((a, b) => b - a);
+async function deleteRowsByRowIndices(sheet, indexes) {
+  const unique = [...new Set(indexes.map(Number).filter(Number.isFinite))].sort((a, b) => b - a);
   if (!unique.length) return;
-
-  const sheetId = await getSheetIdByName(sheetName);
-  const chunkSize = 200;
-
-  for (let i = 0; i < unique.length; i += chunkSize) {
-    const chunk = unique.slice(i, i + chunkSize);
-
+  const sheetId = await getSheetIdByName(sheet);
+  for (let i = 0; i < unique.length; i += 200) {
+    const chunk = unique.slice(i, i + 200);
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId: SHEET_ID,
-      requestBody: {
-        requests: chunk.map(rowIndex => ({
-          deleteDimension: {
-            range: {
-              sheetId,
-              dimension: 'ROWS',
-              startIndex: rowIndex,
-              endIndex: rowIndex + 1,
-            },
-          },
-        })),
-      },
+      requestBody: { requests: chunk.map(idx => ({ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex: idx, endIndex: idx + 1 } } })) },
     });
   }
 }
 
-function filterPredictionResponseByType(list, typeFilter) {
-  const type = String(typeFilter || '').toLowerCase().trim();
-
-  if (!type || type === 'all') return list;
-
+// ========== Логика последних прогнозов ==========
+function getLatestPredictionMap(data) {
+  const latest = new Map();
+  data.forEach((row, idx) => {
+    if (!isDataRow(row, 'prediction_id')) return;
+    const userId = String(row[1] || '').trim(), matchId = String(row[2] || '').trim();
+    if (!userId || !matchId) return;
+    const key = `${userId}|${matchId}`;
+    const ts = Date.parse(row[6] || '') || Date.parse(row[5] || '') || 0;
+    const cur = latest.get(key);
+    if (!cur || ts > cur.ts || (ts === cur.ts && idx > cur.idx)) latest.set(key, { idx, ts, userId, matchId });
+  });
+  return latest;
+}
+function getLatestPredictionsForUser(data, userId) {
+  const map = getLatestPredictionMap(data);
+  const uid = String(userId || '').trim();
+  const rows = [];
+  for (const item of map.values()) {
+    const row = data[item.idx];
+    if (row && String(row[1] || '').trim() === uid) rows.push(row);
+  }
+  return rows;
+}
+function filterPredictionResponseByType(list, type) {
+  const t = String(type || '').toLowerCase().trim();
+  if (!t || t === 'all') return list;
   return list.filter(item => {
-    if (type === 'exact') return item.prediction_type === 'exact';
-    if (type === 'difference') return item.prediction_type === 'difference';
-    if (type === 'draw') return item.prediction_type === 'draw';
-    if (type === 'outcome') return item.prediction_type === 'outcome';
-
-    if (type === 'miss') {
-      return item.prediction_type === 'miss' || (item.status === 'finished' && item.points === 0);
-    }
-
-    if (type === 'successful' || type === 'points') {
-      return item.points > 0;
-    }
-
-    if (type === 'finished') return item.status === 'finished';
-    if (type === 'scheduled') return item.status === 'scheduled';
-    if (type === 'live') return item.status === 'live';
-
+    if (t === 'exact') return item.prediction_type === 'exact';
+    if (t === 'difference') return item.prediction_type === 'difference';
+    if (t === 'draw') return item.prediction_type === 'draw';
+    if (t === 'outcome') return item.prediction_type === 'outcome';
+    if (t === 'miss') return item.prediction_type === 'miss' || (item.status === 'finished' && item.points === 0);
+    if (t === 'successful' || t === 'points') return item.points > 0;
+    if (t === 'finished') return item.status === 'finished';
+    if (t === 'scheduled') return item.status === 'scheduled';
+    if (t === 'live') return item.status === 'live';
     return true;
   });
 }
-
 function sortPredictionsResponse(list, sortMode) {
-  const byDateAsc = (a, b) => {
-    const dateA = new Date(a.kickoff_utc).getTime() || Infinity;
-    const dateB = new Date(b.kickoff_utc).getTime() || Infinity;
-    return dateA - dateB;
-  };
-
-  const normalizedSort = String(sortMode || '').toLowerCase().trim();
-
-  if (normalizedSort === 'exact_first') {
-    return [...list].sort((a, b) => {
-      const aExact = a.prediction_type === 'exact' ? 1 : 0;
-      const bExact = b.prediction_type === 'exact' ? 1 : 0;
-
-      return bExact - aExact || byDateAsc(a, b);
-    });
-  }
-
-  if (normalizedSort === 'points_desc') {
-    return [...list].sort((a, b) => b.points - a.points || byDateAsc(a, b));
-  }
-
-  if (normalizedSort === 'date_desc') {
-    return [...list].sort((a, b) => {
-      const dateA = new Date(a.kickoff_utc).getTime() || -Infinity;
-      const dateB = new Date(b.kickoff_utc).getTime() || -Infinity;
-
-      return dateB - dateA;
-    });
-  }
-
+  const byDateAsc = (a, b) => (new Date(a.kickoff_utc).getTime() || Infinity) - (new Date(b.kickoff_utc).getTime() || Infinity);
+  const s = String(sortMode || '').toLowerCase().trim();
+  if (s === 'exact_first') return [...list].sort((a, b) => (b.prediction_type === 'exact' ? 1 : 0) - (a.prediction_type === 'exact' ? 1 : 0) || byDateAsc(a, b));
+  if (s === 'points_desc') return [...list].sort((a, b) => b.points - a.points || byDateAsc(a, b));
+  if (s === 'date_desc') return [...list].sort((a, b) => (new Date(b.kickoff_utc).getTime() || -Infinity) - (new Date(a.kickoff_utc).getTime() || -Infinity));
   return [...list].sort(byDateAsc);
 }
 
-// ========== Авторизация / безопасность ==========
-function getAdminIds() {
-  return String(process.env.ADMIN_USER_IDS || '')
-    .split(',')
-    .map(item => item.trim())
-    .filter(Boolean);
-}
-
-function verifyTelegramInitData(initDataString) {
+// ========== Авторизация ==========
+function getAdminIds() { return String(process.env.ADMIN_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean); }
+function verifyTelegramInitData(str) {
   try {
-    if (!BOT_TOKEN || !initDataString) return false;
-
-    const params = new URLSearchParams(initDataString);
-    const hash = params.get('hash');
-
+    if (!BOT_TOKEN || !str) return false;
+    const p = new URLSearchParams(str);
+    const hash = p.get('hash');
     if (!hash) return false;
-
-    params.delete('hash');
-
-    const dataCheckString = [...params.entries()]
-      .map(([key, value]) => `${key}=${value}`)
-      .sort()
-      .join('\n');
-
-    const secretKey = crypto
-      .createHmac('sha256', 'WebAppData')
-      .update(BOT_TOKEN)
-      .digest();
-
-    const calculatedHash = crypto
-      .createHmac('sha256', secretKey)
-      .update(dataCheckString)
-      .digest('hex');
-
-    const calculatedBuffer = Buffer.from(calculatedHash, 'hex');
-    const hashBuffer = Buffer.from(hash, 'hex');
-
-    if (calculatedBuffer.length === 0 || hashBuffer.length !== calculatedBuffer.length) {
-      return false;
-    }
-
-    if (!crypto.timingSafeEqual(calculatedBuffer, hashBuffer)) {
-      return false;
-    }
-
-    const authDate = Number(params.get('auth_date') || 0);
-
-    if (authDate && (Date.now() / 1000 - authDate > 86400)) {
-      return false;
-    }
-
+    p.delete('hash');
+    const dcs = [...p.entries()].map(([k, v]) => `${k}=${v}`).sort().join('\n');
+    const secret = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
+    const calc = crypto.createHmac('sha256', secret).update(dcs).digest('hex');
+    const cb = Buffer.from(calc, 'hex'), hb = Buffer.from(hash, 'hex');
+    if (!cb.length || hb.length !== cb.length) return false;
+    if (!crypto.timingSafeEqual(cb, hb)) return false;
+    const authDate = Number(p.get('auth_date') || 0);
+    if (authDate && Date.now() / 1000 - authDate > 86400) return false;
     return true;
-  } catch (error) {
-    return false;
-  }
+  } catch { return false; }
 }
-
 function extractAuthenticatedUser(req) {
   const initData = req.body?.initData || req.query?.initData;
-
   if (initData) {
-    if (BOT_TOKEN && !verifyTelegramInitData(initData)) {
-      return null;
-    }
-
+    if (BOT_TOKEN && !verifyTelegramInitData(initData)) return null;
     try {
-      const params = new URLSearchParams(initData);
-      const user = JSON.parse(params.get('user') || 'null');
-
-      if (user?.id) {
-        return {
-          ...user,
-          id: String(user.id).trim(),
-        };
-      }
-    } catch (error) {
-      return null;
-    }
+      const p = new URLSearchParams(initData);
+      const user = JSON.parse(p.get('user') || 'null');
+      if (user?.id) return { ...user, id: String(user.id).trim() };
+    } catch { return null; }
   }
-
   if (ALLOW_PLAIN_USER_ID) {
-    const userId = req.body?.userId || req.query?.userId;
-
-    if (isNotEmpty(userId)) {
-      return {
-        id: String(userId).trim(),
-        username: req.body?.username || '',
-        first_name: req.body?.firstName || '',
-        last_name: req.body?.lastName || '',
-      };
-    }
+    const uid = req.body?.userId || req.query?.userId;
+    if (isNotEmpty(uid)) return { id: String(uid).trim(), username: req.body?.username || '', first_name: req.body?.firstName || '', last_name: req.body?.lastName || '' };
   }
-
   return null;
 }
-
-function extractUserId(req) {
-  const user = extractAuthenticatedUser(req);
-  return user?.id ?? null;
-}
-
+function extractUserId(req) { return extractAuthenticatedUser(req)?.id ?? null; }
 function requireAdmin(req, res, next) {
-  const apiKey = req.headers['x-admin-api-key'] || req.body?.apiKey;
-
-  if (ADMIN_API_KEY && apiKey === ADMIN_API_KEY) {
-    return next();
-  }
-
+  const key = req.headers['x-admin-api-key'] || req.body?.apiKey;
+  if (ADMIN_API_KEY && key === ADMIN_API_KEY) return next();
   const user = extractAuthenticatedUser(req);
-  const adminIds = getAdminIds();
-
-  if (user?.id && adminIds.includes(String(user.id).trim())) {
-    return next();
-  }
-
+  if (user?.id && getAdminIds().includes(String(user.id).trim())) return next();
   return res.status(403).json({ error: 'Forbidden' });
 }
+const asyncHandler = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-const asyncHandler = fn => {
-  return (req, res, next) => {
-    Promise.resolve(fn(req, res, next)).catch(next);
-  };
-};
-
-// ========== Маппинг статусов ==========
-function mapStatus(apiStatus) {
-  if (apiStatus === 'SCHEDULED' || apiStatus === 'TIMED') return 'scheduled';
-  if (apiStatus === 'LIVE' || apiStatus === 'IN_PLAY' || apiStatus === 'PAUSED') return 'live';
-  if (apiStatus === 'FINISHED') return 'finished';
-  if (apiStatus === 'POSTPONED') return 'postponed';
-  if (apiStatus === 'SUSPENDED' || apiStatus === 'CANCELLED') return apiStatus.toLowerCase();
-
-  return String(apiStatus || '').toLowerCase();
-}
-
-// ========== Перевод названий команд ==========
-const teamTranslations = {
-  'Real Madrid CF': 'Реал Мадрид',
-  'FC Barcelona': 'Барселона',
-  'Manchester City FC': 'Манчестер Сити',
-  'Liverpool FC': 'Ливерпуль',
-  'FC Bayern München': 'Бавария',
-  'Paris Saint-Germain FC': 'ПСЖ',
-  'Juventus FC': 'Ювентус',
-  'AC Milan': 'Милан',
-  'Chelsea FC': 'Челси',
-  'Arsenal FC': 'Арсенал',
-  'Borussia Dortmund': 'Боруссия Дортмунд',
-  'Club Atlético de Madrid': 'Атлетико Мадрид',
-  'FC Internazionale Milano': 'Интер',
-  'SSC Napoli': 'Наполи',
-  'FC Porto': 'Порту',
-  'SL Benfica': 'Бенфика',
-  'AFC Ajax': 'Аякс',
-  'Olympique Lyonnais': 'Лион',
-  'AS Monaco FC': 'Монако',
-  'FC Red Bull Salzburg': 'Зальцбург',
-  'FK Shakhtar Donetsk': 'Шахтер',
-  'GNK Dinamo Zagreb': 'Динамо Загреб',
-  'Celtic FC': 'Селтик',
-  'Rangers FC': 'Рейнджерс',
-  'Club Brugge KV': 'Брюгге',
-  'Galatasaray SK': 'Галатасарай',
-  'Fenerbahçe SK': 'Фенербахче',
-  'Olympiacos FC': 'Олимпиакос',
-  'AEK Athens FC': 'АЕК',
-  'Maccabi Haifa FC': 'Маккаби Хайфа',
-  'FC København': 'Копенгаген',
-  'BSC Young Boys': 'Янг Бойз',
-  'FK Crvena Zvezda': 'Црвена Звезда',
-  'Racing Club de Lens': 'Ланс',
-  'Real Sociedad de Fútbol': 'Реал Сосьедад',
-  'PSV': 'ПСВ',
-  'Feyenoord Rotterdam': 'Фейеноорд',
-  'Sporting CP': 'Спортинг',
-  'Sporting Clube de Portugal': 'Спортинг',
-  'FC Viktoria Plzeň': 'Виктория Пльзень',
-  'Stade Brestois 29': 'Брест',
-  'VfB Stuttgart': 'Штутгарт',
-  'Aston Villa FC': 'Астон Вилла',
-  'Bologna FC 1909': 'Болонья',
-  'Girona FC': 'Жирона',
-  'RC Celta de Vigo': 'Сельта',
-  'Real Betis Balompié': 'Бетис',
-  'Sevilla FC': 'Севилья',
-  'Valencia CF': 'Валенсия',
-  'Lazio Roma': 'Лацио',
-  'Atalanta BC': 'Аталанта',
-  'AS Roma': 'Рома',
-  'Olympique de Marseille': 'Марсель',
-  'Lille OSC': 'Лилль',
-  'OGC Nice': 'Ницца',
-  'Stade Rennais FC': 'Ренн',
-  'RC Strasbourg Alsace': 'Страсбур',
-  'FC Nantes': 'Нант',
-  'SC Braga': 'Брага',
-  'RSC Anderlecht': 'Андерлехт',
-  'KRC Genk': 'Генк',
-  'Ferencvárosi TC': 'Ференцварош',
-  'Ludogorets Razgrad': 'Лудогорец',
-  'Qarabağ FK': 'Карабах',
-  'Sparta Praha': 'Спарта Прага',
-  'Slavia Praha': 'Славия Прага',
-  'SK Slavia Praha': 'Славия Прага',
-  'FC Basel 1893': 'Базель',
-  'Grasshopper Club Zürich': 'Грассхоппер',
-  'Manchester United FC': 'Манчестер Юнайтед',
-  'Villarreal CF': 'Вильярреал',
-  'PAE AEK': 'АЕК',
-  'LASK Linz': 'ЛАСК',
-  'Viking FK': 'Викинг',
-  'ŠK Slovan Bratislava': 'Слован Братислава',
-  'FK Bodø/Glimt': 'Будё-Глимт',
-  'Como 1907': 'Комо',
-  'RB Leipzig': 'РБ Лейпциг',
-  'Sabah FK': 'Сабах',
-};
-
-const teamSynonyms = {
-  'мс': 'Манчестер Сити',
-  'ман сити': 'Манчестер Сити',
-  'мю': 'Манчестер Юнайтед',
-  'ман юнайтед': 'Манчестер Юнайтед',
-  'манчестер юнайтед': 'Манчестер Юнайтед',
-  'реал': 'Реал Мадрид',
-  'реал мадрид': 'Реал Мадрид',
-  'барса': 'Барселона',
-  'барселона': 'Барселона',
-  'бавария': 'Бавария',
-  'бавария мюнхен': 'Бавария',
-  'дортмунд': 'Боруссия Дортмунд',
-  'боруссия д': 'Боруссия Дортмунд',
-  'боруссия дортмунд': 'Боруссия Дортмунд',
-  'атлетико': 'Атлетико Мадрид',
-  'атлетико мадрид': 'Атлетико Мадрид',
-  'интер': 'Интер',
-  'наполи': 'Наполи',
-  'псж': 'ПСЖ',
-  'пари сен-жермен': 'ПСЖ',
-  'париж': 'ПСЖ',
-  'ливерпуль': 'Ливерпуль',
-  'челси': 'Челси',
-  'арсенал': 'Арсенал',
-  'ювентус': 'Ювентус',
-  'милан': 'Милан',
-  'аякс': 'Аякс',
-  'порту': 'Порту',
-  'бенфика': 'Бенфика',
-  'лион': 'Лион',
-  'монако': 'Монако',
-  'зальцбург': 'Зальцбург',
-  'шахтер': 'Шахтер',
-  'динамо загреб': 'Динамо Загреб',
-  'селтик': 'Селтик',
-  'рейнджерс': 'Рейнджерс',
-  'брюгге': 'Брюгге',
-  'галатасарай': 'Галатасарай',
-  'фенербахче': 'Фенербахче',
-  'олимпиакос': 'Олимпиакос',
-  'аек': 'АЕК',
-  'маккаби хайфа': 'Маккаби Хайфа',
-  'копенгаген': 'Копенгаген',
-  'янг бойз': 'Янг Бойз',
-  'црвена звезда': 'Црвена Звезда',
-  'ланс': 'Ланс',
-  'реал сосьедад': 'Реал Сосьедад',
-  'псв': 'ПСВ',
-  'фейеноорд': 'Фейеноорд',
-  'спортинг': 'Спортинг',
-  'спортинг лиссабон': 'Спортинг',
-  'виктория пльзень': 'Виктория Пльзень',
-  'брест': 'Брест',
-  'штутгарт': 'Штутгарт',
-  'астон вилла': 'Астон Вилла',
-  'болонья': 'Болонья',
-  'жирона': 'Жирона',
-  'сельта': 'Сельта',
-  'бетис': 'Бетис',
-  'севилья': 'Севилья',
-  'валенсия': 'Валенсия',
-  'лацио': 'Лацио',
-  'аталанта': 'Аталанта',
-  'рома': 'Рома',
-  'марсель': 'Марсель',
-  'лилль': 'Лилль',
-  'ницца': 'Ницца',
-  'ренн': 'Ренн',
-  'страсбур': 'Страсбур',
-  'нант': 'Нант',
-  'брага': 'Брага',
-  'андерлехт': 'Андерлехт',
-  'генк': 'Генк',
-  'ференцварош': 'Ференцварош',
-  'лудогорец': 'Лудогорец',
-  'карабах': 'Карабах',
-  'спарта прага': 'Спарта Прага',
-  'славия прага': 'Славия Прага',
-  'базель': 'Базель',
-  'грассхоппер': 'Грассхоппер',
-  'вильярреал': 'Вильярреал',
-  'ласк': 'ЛАСК',
-  'викинг': 'Викинг',
-  'слован братислава': 'Слован Братислава',
-  'будё-глимт': 'Будё-Глимт',
-  'комо': 'Комо',
-  'рб лейпциг': 'РБ Лейпциг',
-  'сабах': 'Сабах',
-};
-
+// ========== Команды и очки ==========
+const teamTranslations = { 'Real Madrid CF': 'Реал Мадрид', 'FC Barcelona': 'Барселона', 'Manchester City FC': 'Манчестер Сити', 'Liverpool FC': 'Ливерпуль', 'FC Bayern München': 'Бавария', 'Paris Saint-Germain FC': 'ПСЖ', 'Juventus FC': 'Ювентус', 'AC Milan': 'Милан', 'Chelsea FC': 'Челси', 'Arsenal FC': 'Арсенал', 'Borussia Dortmund': 'Боруссия Дортмунд', 'Club Atlético de Madrid': 'Атлетико Мадрид', 'FC Internazionale Milano': 'Интер', 'SSC Napoli': 'Наполи', 'FC Porto': 'Порту', 'SL Benfica': 'Бенфика', 'AFC Ajax': 'Аякс', 'Olympique Lyonnais': 'Лион', 'AS Monaco FC': 'Монако', 'FC Red Bull Salzburg': 'Зальцбург', 'FK Shakhtar Donetsk': 'Шахтер', 'GNK Dinamo Zagreb': 'Динамо Загреб', 'Celtic FC': 'Селтик', 'Rangers FC': 'Рейнджерс', 'Club Brugge KV': 'Брюгге', 'Galatasaray SK': 'Галатасарай', 'Fenerbahçe SK': 'Фенербахче', 'Olympiacos FC': 'Олимпиакос', 'AEK Athens FC': 'АЕК', 'Maccabi Haifa FC': 'Маккаби Хайфа', 'FC København': 'Копенгаген', 'BSC Young Boys': 'Янг Бойз', 'FK Crvena Zvezda': 'Црвена Звезда', 'Racing Club de Lens': 'Ланс', 'Real Sociedad de Fútbol': 'Реал Сосьедад', 'PSV': 'ПСВ', 'Feyenoord Rotterdam': 'Фейеноорд', 'Sporting CP': 'Спортинг', 'Sporting Clube de Portugal': 'Спортинг', 'FC Viktoria Plzeň': 'Виктория Пльзень', 'Stade Brestois 29': 'Брест', 'VfB Stuttgart': 'Штутгарт', 'Aston Villa FC': 'Астон Вилла', 'Bologna FC 1909': 'Болонья', 'Girona FC': 'Жирона', 'RC Celta de Vigo': 'Сельта', 'Real Betis Balompié': 'Бетис', 'Sevilla FC': 'Севилья', 'Valencia CF': 'Валенсия', 'Lazio Roma': 'Лацио', 'Atalanta BC': 'Аталанта', 'AS Roma': 'Рома', 'Olympique de Marseille': 'Марсель', 'Lille OSC': 'Лилль', 'OGC Nice': 'Ницца', 'Stade Rennais FC': 'Ренн', 'RC Strasbourg Alsace': 'Страсбур', 'FC Nantes': 'Нант', 'SC Braga': 'Брага', 'RSC Anderlecht': 'Андерлехт', 'KRC Genk': 'Генк', 'Ferencvárosi TC': 'Ференцварош', 'Ludogorets Razgrad': 'Лудогорец', 'Qarabağ FK': 'Карабах', 'Sparta Praha': 'Спарта Прага', 'Slavia Praha': 'Славия Прага', 'SK Slavia Praha': 'Славия Прага', 'FC Basel 1893': 'Базель', 'Grasshopper Club Zürich': 'Грассхоппер', 'Manchester United FC': 'Манчестер Юнайтед', 'Villarreal CF': 'Вильярреал', 'PAE AEK': 'АЕК', 'LASK Linz': 'ЛАСК', 'Viking FK': 'Викинг', 'ŠK Slovan Bratislava': 'Слован Братислава', 'FK Bodø/Glimt': 'Будё-Глимт', 'Como 1907': 'Комо', 'RB Leipzig': 'РБ Лейпциг', 'Sabah FK': 'Сабах' };
+const teamSynonyms = { 'мс': 'Манчестер Сити', 'ман сити': 'Манчестер Сити', 'мю': 'Манчестер Юнайтед', 'ман юнайтед': 'Манчестер Юнайтед', 'манчестер юнайтед': 'Манчестер Юнайтед', 'реал': 'Реал Мадрид', 'реал мадрид': 'Реал Мадрид', 'барса': 'Барселона', 'барселона': 'Барселона', 'бавария': 'Бавария', 'бавария мюнхен': 'Бавария', 'дортмунд': 'Боруссия Дортмунд', 'боруссия д': 'Боруссия Дортмунд', 'боруссия дортмунд': 'Боруссия Дортмунд', 'атлетико': 'Атлетико Мадрид', 'атлетико мадрид': 'Атлетико Мадрид', 'интер': 'Интер', 'наполи': 'Наполи', 'псж': 'ПСЖ', 'пари сен-жермен': 'ПСЖ', 'париж': 'ПСЖ', 'ливерпуль': 'Ливерпуль', 'челси': 'Челси', 'арсенал': 'Арсенал', 'ювентус': 'Ювентус', 'милан': 'Милан', 'аякс': 'Аякс', 'порту': 'Порту', 'бенфика': 'Бенфика', 'лион': 'Лион', 'монако': 'Монако', 'зальцбург': 'Зальцбург', 'шахтер': 'Шахтер', 'динамо загреб': 'Динамо Загреб', 'селтик': 'Селтик', 'рейнджерс': 'Рейнджерс', 'брюгге': 'Брюгге', 'галатасарай': 'Галатасарай', 'фенербахче': 'Фенербахче', 'олимпиакос': 'Олимпиакос', 'аек': 'АЕК', 'маккаби хайфа': 'Маккаби Хайфа', 'копенгаген': 'Копенгаген', 'янг бойз': 'Янг Бойз', 'црвена звезда': 'Црвена Звезда', 'ланс': 'Ланс', 'реал сосьедад': 'Реал Сосьедад', 'псв': 'ПСВ', 'фейеноорд': 'Фейеноорд', 'спортинг': 'Спортинг', 'спортинг лиссабон': 'Спортинг', 'виктория пльзень': 'Виктория Пльзень', 'брест': 'Брест', 'штутгарт': 'Штутгарт', 'астон вилла': 'Астон Вилла', 'болонья': 'Болонья', 'жирона': 'Жирона', 'сельта': 'Сельта', 'бетис': 'Бетис', 'севилья': 'Севилья', 'валенсия': 'Валенсия', 'лацио': 'Лацио', 'аталанта': 'Аталанта', 'рома': 'Рома', 'марсель': 'Марсель', 'лилль': 'Лилль', 'ницца': 'Ницца', 'ренн': 'Ренн', 'страсбур': 'Страсбур', 'нант': 'Нант', 'брага': 'Брага', 'андерлехт': 'Андерлехт', 'генк': 'Генк', 'ференцварош': 'Ференцварош', 'лудогорец': 'Лудогорец', 'карабах': 'Карабах', 'спарта прага': 'Спарта Прага', 'славия прага': 'Славия Прага', 'базель': 'Базель', 'грассхоппер': 'Грассхоппер', 'вильярреал': 'Вильярреал', 'ласк': 'ЛАСК', 'викинг': 'Викинг', 'слован братислава': 'Слован Братислава', 'будё-глимт': 'Будё-Глимт', 'комо': 'Комо', 'рб лейпциг': 'РБ Лейпциг', 'сабах': 'Сабах' };
 const teamAliases = new Map();
-
-for (const [apiName, ruName] of Object.entries(teamTranslations)) {
-  teamAliases.set(apiName.toLowerCase().trim(), ruName);
-  teamAliases.set(ruName.toLowerCase().trim(), ruName);
-}
-
-for (const [alias, ruName] of Object.entries(teamSynonyms)) {
-  teamAliases.set(alias.toLowerCase().trim(), ruName);
-}
-
-function translateTeam(name) {
-  if (!name) return '';
-  return teamTranslations[name] || name;
-}
-
+Object.entries(teamTranslations).forEach(([api, ru]) => { teamAliases.set(api.toLowerCase().trim(), ru); teamAliases.set(ru.toLowerCase().trim(), ru); });
+Object.entries(teamSynonyms).forEach(([alias, ru]) => teamAliases.set(alias.toLowerCase().trim(), ru));
+function translateTeam(name) { return name ? (teamTranslations[name] || name) : ''; }
 function normalizeTeamName(name) {
   const lower = String(name || '').toLowerCase().trim();
-
-  if (teamAliases.has(lower)) {
-    return teamAliases.get(lower);
-  }
-
-  const cleaned = lower
-    .replace(/[«»"'()]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  if (teamAliases.has(cleaned)) {
-    return teamAliases.get(cleaned);
-  }
-
-  return String(name || '').trim();
+  if (teamAliases.has(lower)) return teamAliases.get(lower);
+  const cleaned = lower.replace(/[«»"'()]/g, '').replace(/\s+/g, ' ').trim();
+  return teamAliases.has(cleaned) ? teamAliases.get(cleaned) : String(name || '').trim();
 }
 
 // ========== Помощники для Odds API ==========
 const ruToApiTeam = new Map();
 const apiTeamLowerMap = new Map();
-
-for (const [apiName, ruName] of Object.entries(teamTranslations)) {
-  ruToApiTeam.set(ruName.toLowerCase().trim(), apiName);
-  apiTeamLowerMap.set(apiName.toLowerCase().trim(), apiName);
-}
-
-const oddsTeamAliases = {
-  'bayern munich': 'FC Bayern München',
-  'bayern': 'FC Bayern München',
-  'psg': 'Paris Saint-Germain FC',
-  'paris saint germain': 'Paris Saint-Germain FC',
-  'paris sg': 'Paris Saint-Germain FC',
-  'man city': 'Manchester City FC',
-  'manchester city': 'Manchester City FC',
-  'man united': 'Manchester United FC',
-  'manchester united': 'Manchester United FC',
-  'inter': 'FC Internazionale Milano',
-  'inter milan': 'FC Internazionale Milano',
-  'juventus': 'Juventus FC',
-  'milan': 'AC Milan',
-  'borussia dortmund': 'Borussia Dortmund',
-  'dortmund': 'Borussia Dortmund',
-  'atletico madrid': 'Club Atlético de Madrid',
-  'atletico': 'Club Atlético de Madrid',
-  'napoli': 'SSC Napoli',
-  'porto': 'FC Porto',
-  'benfica': 'SL Benfica',
-  'ajax': 'AFC Ajax',
-  'lyon': 'Olympique Lyonnais',
-  'monaco': 'AS Monaco FC',
-  'salzburg': 'FC Red Bull Salzburg',
-  'rb salzburg': 'FC Red Bull Salzburg',
-  'shakhtar': 'FK Shakhtar Donetsk',
-  'shakhtar donetsk': 'FK Shakhtar Donetsk',
-  'dinamo zagreb': 'GNK Dinamo Zagreb',
-  'celtic': 'Celtic FC',
-  'rangers': 'Rangers FC',
-  'club brugge': 'Club Brugge KV',
-  'brugge': 'Club Brugge KV',
-  'galatasaray': 'Galatasaray SK',
-  'fenerbahce': 'Fenerbahçe SK',
-  'olympiacos': 'Olympiacos FC',
-  'aek athens': 'AEK Athens FC',
-  'maccabi haifa': 'Maccabi Haifa FC',
-  'copenhagen': 'FC København',
-  'young boys': 'BSC Young Boys',
-  'crvena zvezda': 'FK Crvena Zvezda',
-  'red star belgrade': 'FK Crvena Zvezda',
-  'lens': 'Racing Club de Lens',
-  'real sociedad': 'Real Sociedad de Fútbol',
-  'psv eindhoven': 'PSV',
-  'fegeenoord': 'Feyenoord Rotterdam',
-  'sporting lisbon': 'Sporting CP',
-  'viktoria plzen': 'FC Viktoria Plzeň',
-  'brest': 'Stade Brestois 29',
-  'stuttgart': 'VfB Stuttgart',
-  'aston villa': 'Aston Villa FC',
-  'bologna': 'Bologna FC 1909',
-  'girona': 'Girona FC',
-  'celta': 'RC Celta de Vigo',
-  'celta vigo': 'RC Celta de Vigo',
-  'real betis': 'Real Betis Balompié',
-  'betis': 'Real Betis Balompié',
-  'sevilla': 'Sevilla FC',
-  'valencia': 'Valencia CF',
-  'lazio': 'Lazio Roma',
-  'atalanta': 'Atalanta BC',
-  'roma': 'AS Roma',
-  'marseille': 'Olympique de Marseille',
-  'lille': 'Lille OSC',
-  'nice': 'OGC Nice',
-  'rennes': 'Stade Rennais FC',
-  'strasbourg': 'RC Strasbourg Alsace',
-  'nantes': 'FC Nantes',
-  'braga': 'SC Braga',
-  'anderlecht': 'RSC Anderlecht',
-  'genk': 'KRC Genk',
-  'ferencvaros': 'Ferencvárosi TC',
-  'ludogorets': 'Ludogorets Razgrad',
-  'qarabag': 'Qarabağ FK',
-  'sparta prague': 'Sparta Praha',
-  'slavia prague': 'Slavia Praha',
-  'basel': 'FC Basel 1893',
-  'grasshoppers': 'Grasshopper Club Zürich',
-  'villarreal': 'Villarreal CF',
-  'aek': 'PAE AEK',
-  'lask': 'LASK Linz',
-  'viking': 'Viking FK',
-  'slovan bratislava': 'ŠK Slovan Bratislava',
-  'bodo/glimt': 'FK Bodø/Glimt',
-  'bodoe/glimt': 'FK Bodø/Glimt',
-  'como': 'Como 1907',
-  'rb leipzig': 'RB Leipzig',
-  'leipzig': 'RB Leipzig',
-  'sabah': 'Sabah FK',
-  'real madrid': 'Real Madrid CF',
-  'barcelona': 'FC Barcelona',
-  'liverpool': 'Liverpool FC',
-  'chelsea': 'Chelsea FC',
-  'arsenal': 'Arsenal FC',
-};
-
-function storedTeamToApiTeam(storedTeam) {
-  const lower = String(storedTeam || '').toLowerCase().trim();
-
-  if (!lower) return '';
-
-  return (
-    ruToApiTeam.get(lower) ||
-    apiTeamLowerMap.get(lower) ||
-    String(storedTeam || '').trim()
-  );
-}
-
-function findOurApiTeamName(oddsTeam) {
-  const raw = String(oddsTeam || '').toLowerCase().trim();
-
-  if (!raw) return null;
-
-  if (oddsTeamAliases[raw]) {
-    return oddsTeamAliases[raw];
-  }
-
-  const exact = apiTeamLowerMap.get(raw);
-  if (exact) return exact;
-
-  for (const [lower, apiName] of apiTeamLowerMap.entries()) {
-    if (lower.includes(raw) || raw.includes(lower)) {
-      return apiName;
-    }
-  }
-
-  return null;
-}
-
+Object.entries(teamTranslations).forEach(([api, ru]) => { ruToApiTeam.set(ru.toLowerCase().trim(), api); apiTeamLowerMap.set(api.toLowerCase().trim(), api); });
+const oddsTeamAliases = { 'bayern munich': 'FC Bayern München', 'bayern': 'FC Bayern München', 'psg': 'Paris Saint-Germain FC', 'paris saint germain': 'Paris Saint-Germain FC', 'paris sg': 'Paris Saint-Germain FC', 'man city': 'Manchester City FC', 'manchester city': 'Manchester City FC', 'man united': 'Manchester United FC', 'manchester united': 'Manchester United FC', 'inter': 'FC Internazionale Milano', 'inter milan': 'FC Internazionale Milano', 'juventus': 'Juventus FC', 'milan': 'AC Milan', 'borussia dortmund': 'Borussia Dortmund', 'dortmund': 'Borussia Dortmund', 'atletico madrid': 'Club Atlético de Madrid', 'atletico': 'Club Atlético de Madrid', 'napoli': 'SSC Napoli', 'porto': 'FC Porto', 'benfica': 'SL Benfica', 'ajax': 'AFC Ajax', 'lyon': 'Olympique Lyonnais', 'monaco': 'AS Monaco FC', 'salzburg': 'FC Red Bull Salzburg', 'rb salzburg': 'FC Red Bull Salzburg', 'shakhtar': 'FK Shakhtar Donetsk', 'shakhtar donetsk': 'FK Shakhtar Donetsk', 'dinamo zagreb': 'GNK Dinamo Zagreb', 'celtic': 'Celtic FC', 'rangers': 'Rangers FC', 'club brugge': 'Club Brugge KV', 'brugge': 'Club Brugge KV', 'galatasaray': 'Galatasaray SK', 'fenerbahce': 'Fenerbahçe SK', 'olympiacos': 'Olympiacos FC', 'aek athens': 'AEK Athens FC', 'maccabi haifa': 'Maccabi Haifa FC', 'copenhagen': 'FC København', 'young boys': 'BSC Young Boys', 'crvena zvezda': 'FK Crvena Zvezda', 'red star belgrade': 'FK Crvena Zvezda', 'lens': 'Racing Club de Lens', 'real sociedad': 'Real Sociedad de Fútbol', 'psv eindhoven': 'PSV', 'feyenoord': 'Feyenoord Rotterdam', 'sporting lisbon': 'Sporting CP', 'viktoria plzen': 'FC Viktoria Plzeň', 'brest': 'Stade Brestois 29', 'stuttgart': 'VfB Stuttgart', 'aston villa': 'Aston Villa FC', 'bologna': 'Bologna FC 1909', 'girona': 'Girona FC', 'celta': 'RC Celta de Vigo', 'celta vigo': 'RC Celta de Vigo', 'real betis': 'Real Betis Balompié', 'betis': 'Real Betis Balompié', 'sevilla': 'Sevilla FC', 'valencia': 'Valencia CF', 'lazio': 'Lazio Roma', 'atalanta': 'Atalanta BC', 'roma': 'AS Roma', 'marseille': 'Olympique de Marseille', 'lille': 'Lille OSC', 'nice': 'OGC Nice', 'rennes': 'Stade Rennais FC', 'strasbourg': 'RC Strasbourg Alsace', 'nantes': 'FC Nantes', 'braga': 'SC Braga', 'anderlecht': 'RSC Anderlecht', 'genk': 'KRC Genk', 'ferencvaros': 'Ferencvárosi TC', 'ludogorets': 'Ludogorets Razgrad', 'qarabag': 'Qarabağ FK', 'sparta prague': 'Sparta Praha', 'slavia prague': 'Slavia Praha', 'basel': 'FC Basel 1893', 'grasshoppers': 'Grasshopper Club Zürich', 'villarreal': 'Villarreal CF', 'aek': 'PAE AEK', 'lask': 'LASK Linz', 'viking': 'Viking FK', 'slovan bratislava': 'ŠK Slovan Bratislava', 'bodo/glimt': 'FK Bodø/Glimt', 'bodoe/glimt': 'FK Bodø/Glimt', 'como': 'Como 1907', 'rb leipzig': 'RB Leipzig', 'leipzig': 'RB Leipzig', 'sabah': 'Sabah FK', 'real madrid': 'Real Madrid CF', 'barcelona': 'FC Barcelona', 'liverpool': 'Liverpool FC', 'chelsea': 'Chelsea FC', 'arsenal': 'Arsenal FC' };
+function storedTeamToApiTeam(storedTeam) { const lower = String(storedTeam || '').toLowerCase().trim(); if (!lower) return ''; return ruToApiTeam.get(lower) || apiTeamLowerMap.get(lower) || String(storedTeam || '').trim(); }
+function findOurApiTeamName(oddsTeam) { const raw = String(oddsTeam || '').toLowerCase().trim(); if (!raw) return null; if (oddsTeamAliases[raw]) return oddsTeamAliases[raw]; const exact = apiTeamLowerMap.get(raw); if (exact) return exact; for (const [lower, apiName] of apiTeamLowerMap.entries()) { if (lower.includes(raw) || raw.includes(lower)) return apiName; } return null; }
 async function fetchOddsEvents() {
   if (!ODDS_API_KEY) return [];
-
   const now = Date.now();
-
-  if (now - oddsCache.fetchedAt < ODDS_CACHE_TTL_MS) {
-    return oddsCache.events;
-  }
-
+  if (now - oddsCache.fetchedAt < ODDS_CACHE_TTL_MS) return oddsCache.events;
   const sportKeys = [...new Set([ODDS_SPORT_KEY, 'upcoming'].filter(Boolean))];
-
   for (const sportKey of sportKeys) {
     try {
-      const url =
-        `${ODDS_API_BASE_URL}/sports/${encodeURIComponent(sportKey)}/odds/` +
-        `?apiKey=${encodeURIComponent(ODDS_API_KEY)}` +
-        `&regions=eu` +
-        `&markets=h2h` +
-        `&oddsFormat=decimal` +
-        `&dateFormat=iso`;
-
+      const url = `${ODDS_API_BASE_URL}/sports/${encodeURIComponent(sportKey)}/odds/?apiKey=${encodeURIComponent(ODDS_API_KEY)}&regions=eu&markets=h2h&oddsFormat=decimal&dateFormat=iso`;
       const response = await fetch(url);
-
-      if (!response.ok) {
-        continue;
-      }
-
+      if (!response.ok) continue;
       const data = await response.json();
-
-      if (Array.isArray(data) && data.length > 0) {
-        oddsCache = {
-          fetchedAt: now,
-          events: data,
-        };
-
-        return data;
-      }
-    } catch (error) {
-      console.error('Ошибка загрузки коэффициентов:', error.message);
-    }
+      if (Array.isArray(data) && data.length > 0) { oddsCache = { fetchedAt: now, events: data }; return data; }
+    } catch (error) { console.error('Ошибка загрузки коэффициентов:', error.message); }
   }
-
-  oddsCache = {
-    fetchedAt: now,
-    events: [],
-  };
-
+  oddsCache = { fetchedAt: now, events: [] };
   return [];
 }
-
 function getOddsFromEvent(event) {
   const rows = [];
-
   (event.bookmakers || []).forEach(bookmaker => {
-    const market = (bookmaker.markets || []).find(item => {
-      return String(item.key || '').toLowerCase() === 'h2h';
-    });
-
+    const market = (bookmaker.markets || []).find(item => String(item.key || '').toLowerCase() === 'h2h');
     if (!market) return;
-
     const outcomes = market.outcomes || [];
-
     const home = outcomes.find(outcome => outcome.name === event.home_team);
     const away = outcomes.find(outcome => outcome.name === event.away_team);
-    const draw = outcomes.find(outcome => {
-      return String(outcome.name || '').toLowerCase() === 'draw';
-    });
-
-    if (home?.price && away?.price && draw?.price) {
-      rows.push({
-        home: Number(home.price),
-        draw: Number(draw.price),
-        away: Number(away.price),
-      });
-    }
+    const draw = outcomes.find(outcome => String(outcome.name || '').toLowerCase() === 'draw');
+    if (home?.price && away?.price && draw?.price) rows.push({ home: Number(home.price), draw: Number(draw.price), away: Number(away.price) });
   });
-
   if (!rows.length) return null;
-
-  const average = key => {
-    const values = rows.map(row => row[key]).filter(Number.isFinite);
-
-    if (!values.length) return null;
-
-    const sum = values.reduce((acc, value) => acc + value, 0);
-    return Math.round((sum / values.length) * 100) / 100;
-  };
-
-  const home = average('home');
-  const draw = average('draw');
-  const away = average('away');
-
+  const average = key => { const values = rows.map(row => row[key]).filter(Number.isFinite); if (!values.length) return null; return Math.round((values.reduce((a, v) => a + v, 0) / values.length) * 100) / 100; };
+  const home = average('home'), draw = average('draw'), away = average('away');
   if (home === null || draw === null || away === null) return null;
-
-  return {
-    home,
-    draw,
-    away,
-    bookmakers: rows.length,
-  };
+  return { home, draw, away, bookmakers: rows.length };
 }
 
-// ========== Работа с Football-Data.org ==========
-function mapStage(apiStage) {
-  const stages = {
-    PRELIMINARY: 'Предварительный раунд',
-    FIRST_QUALIFYING_ROUND: '1-й квал. раунд',
-    SECOND_QUALIFYING_ROUND: '2-й квал. раунд',
-    THIRD_QUALIFYING_ROUND: '3-й квал. раунд',
-    PLAY_OFF_ROUND: 'Раунд плей-офф',
-    GROUP_STAGE: 'Групповой этап',
-    ROUND_OF_16: '1/8 финала',
-    QUARTER_FINALS: '1/4 финала',
-    SEMI_FINALS: 'Полуфинал',
-    FINAL: 'Финал',
-  };
-
-  return stages[apiStage] || apiStage;
-}
-
+function mapStage(apiStage) { const stages = { PRELIMINARY: 'Предварительный раунд', FIRST_QUALIFYING_ROUND: '1-й квал. раунд', SECOND_QUALIFYING_ROUND: '2-й квал. раунд', THIRD_QUALIFYING_ROUND: '3-й квал. раунд', PLAY_OFF_ROUND: 'Раунд плей-офф', GROUP_STAGE: 'Групповой этап', ROUND_OF_16: '1/8 финала', QUARTER_FINALS: '1/4 финала', SEMI_FINALS: 'Полуфинал', FINAL: 'Финал' }; return stages[apiStage] || apiStage; }
+function mapStatus(apiStatus) { if (apiStatus === 'SCHEDULED' || apiStatus === 'TIMED') return 'scheduled'; if (apiStatus === 'LIVE' || apiStatus === 'IN_PLAY' || apiStatus === 'PAUSED') return 'live'; if (apiStatus === 'FINISHED') return 'finished'; if (apiStatus === 'POSTPONED') return 'postponed'; if (apiStatus === 'SUSPENDED' || apiStatus === 'CANCELLED') return apiStatus.toLowerCase(); return String(apiStatus || '').toLowerCase(); }
 async function fetchFootball(path) {
-  if (!FOOTBALL_DATA_API_KEY) {
-    throw new Error('FOOTBALL_DATA_API_KEY не задан');
-  }
-
-  const response = await fetch(`${FOOTBALL_DATA_BASE_URL}${path}`, {
-    headers: {
-      'X-Auth-Token': FOOTBALL_DATA_API_KEY,
-    },
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    const error = new Error(`Football-Data.org API error: ${response.status} ${text}`);
-    error.status = response.status;
-    throw error;
-  }
-
-  return response.json();
+  if (!FOOTBALL_DATA_API_KEY) throw new Error('FOOTBALL_DATA_API_KEY не задан');
+  const res = await fetch(`${FOOTBALL_DATA_BASE_URL}${path}`, { headers: { 'X-Auth-Token': FOOTBALL_DATA_API_KEY } });
+  if (!res.ok) { const text = await res.text(); const err = new Error(`Football-Data.org API error: ${res.status} ${text}`); err.status = res.status; throw err; }
+  return res.json();
 }
-
-function calculatePoints(predHome, predAway, actHome, actAway) {
-  const ph = toScore(predHome);
-  const pa = toScore(predAway);
-  const ah = toScore(actHome);
-  const aa = toScore(actAway);
-
-  if (ph === null || pa === null || ah === null || aa === null) {
-    return {
-      points: 0,
-      type: 'miss',
-    };
-  }
-
-  if (ph === ah && pa === aa) {
-    return {
-      points: 5,
-      type: 'exact',
-    };
-  }
-
-  if (ph === pa && ah === aa) {
-    return {
-      points: 3,
-      type: 'draw',
-    };
-  }
-
-  if (ph - pa === ah - aa) {
-    return {
-      points: 3,
-      type: 'difference',
-    };
-  }
-
-  if ((ph > pa && ah > aa) || (ph < pa && ah < aa)) {
-    return {
-      points: 1,
-      type: 'outcome',
-    };
-  }
-
-  return {
-    points: 0,
-    type: 'miss',
-  };
+function calculatePoints(ph, pa, ah, aa) {
+  ph = toScore(ph); pa = toScore(pa); ah = toScore(ah); aa = toScore(aa);
+  if (ph === null || pa === null || ah === null || aa === null) return { points: 0, type: 'miss' };
+  if (ph === ah && pa === aa) return { points: 5, type: 'exact' };
+  if (ph === pa && ah === aa) return { points: 3, type: 'draw' };
+  if (ph - pa === ah - aa) return { points: 3, type: 'difference' };
+  if ((ph > pa && ah > aa) || (ph < pa && ah < aa)) return { points: 1, type: 'outcome' };
+  return { points: 0, type: 'miss' };
 }
-
-function emptyUserDelta() {
-  return {
-    points: 0,
-    successful: 0,
-    exact: 0,
-    difference: 0,
-    draws: 0,
-    outcomes: 0,
-    misses: 0,
-  };
-}
-
+function emptyUserDelta() { return { points: 0, successful: 0, exact: 0, difference: 0, draws: 0, outcomes: 0, misses: 0 }; }
 function addResultToDelta(delta, result, sign) {
   if (!delta || !result) return;
-
-  const points = toNum(result.points, 0);
-
-  delta.points += sign * points;
-
-  if (points > 0) {
-    delta.successful += sign;
-  }
-
-  if (result.type === 'exact') {
-    delta.exact += sign;
-  }
-
-  if (result.type === 'difference') {
-    delta.difference += sign;
-  }
-
-  if (result.type === 'draw') {
-    delta.draws += sign;
-  }
-
-  if (result.type === 'outcome') {
-    delta.outcomes += sign;
-  }
-
-  if (result.type === 'miss') {
-    delta.misses += sign;
-  }
+  const pts = toNum(result.points, 0);
+  delta.points += sign * pts;
+  if (pts > 0) delta.successful += sign;
+  if (result.type === 'exact') delta.exact += sign;
+  if (result.type === 'difference') delta.difference += sign;
+  if (result.type === 'draw') delta.draws += sign;
+  if (result.type === 'outcome') delta.outcomes += sign;
+  if (result.type === 'miss') delta.misses += sign;
 }
 
-// Идемпотентный пересчет очков для конкретного матча:
-// учитываем только самый последний прогноз пользователя на матч.
-// Старые дубли помечаем как duplicate и обнуляем.
 async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
-  const ah = toScore(homeScore);
-  const aa = toScore(awayScore);
-
-  if (ah === null || aa === null) {
-    return 0;
-  }
-
+  const ah = toScore(homeScore), aa = toScore(awayScore);
+  if (ah === null || aa === null) return 0;
   const matchIdStr = String(matchId).trim();
-
   const predictionsData = await getSheetData('Predictions', 'A:Z');
   const latestMap = getLatestPredictionMap(predictionsData);
-
   const predictionUpdates = [];
   const userDeltas = new Map();
-
   predictionsData.forEach((row, rowIndex) => {
     if (!isDataRow(row, 'prediction_id')) return;
-
-    const predictionMatchId = String(row[2] || '').trim();
-    if (predictionMatchId !== matchIdStr) return;
-
+    const pMatchId = String(row[2] || '').trim();
+    if (pMatchId !== matchIdStr) return;
     const userId = String(row[1] || '').trim();
     if (!userId) return;
-
-    const key = `${userId}|${predictionMatchId}`;
+    const key = `${userId}|${pMatchId}`;
     const latest = latestMap.get(key);
-
     if (!latest) return;
-
-    const oldPoints = toNum(row[7], 0);
-    const oldType = String(row[8] || '').trim();
-
-    const ensureDelta = () => {
-      if (!userDeltas.has(userId)) {
-        userDeltas.set(userId, emptyUserDelta());
-      }
-
-      return userDeltas.get(userId);
-    };
-
-    // Если это не последний прогноз пользователя на матч — обнуляем его
-    if (rowIndex !== latest.rowIndex) {
+    const oldPoints = toNum(row[7], 0), oldType = String(row[8] || '').trim();
+    const ensureDelta = () => { if (!userDeltas.has(userId)) userDeltas.set(userId, emptyUserDelta()); return userDeltas.get(userId); };
+    if (rowIndex !== latest.idx) {
       if (oldPoints !== 0 || oldType !== 'duplicate') {
-        const updatedPrediction = padRow(row, EXPECTED_COLUMNS.Predictions);
-
-        // Важно: не меняем updated_at у дубля, чтобы он случайно не стал "последним"
-        updatedPrediction[7] = 0;
-        updatedPrediction[8] = 'duplicate';
-
-        predictionUpdates.push({
-          rowIndex,
-          values: updatedPrediction,
-        });
-
+        const upd = padRow(row, EXPECTED_COLUMNS.Predictions);
+        upd[7] = 0; upd[8] = 'duplicate';
+        predictionUpdates.push({ rowIndex, values: upd });
         addResultToDelta(ensureDelta(), { points: oldPoints, type: oldType }, -1);
       }
-
       return;
     }
-
     const newResult = calculatePoints(row[3], row[4], ah, aa);
-    const changed = oldPoints !== newResult.points || oldType !== newResult.type;
-
-    if (!changed) return;
-
-    const updatedPrediction = padRow(row, EXPECTED_COLUMNS.Predictions);
-
-    updatedPrediction[6] = new Date().toISOString();
-    updatedPrediction[7] = newResult.points;
-    updatedPrediction[8] = newResult.type;
-
-    predictionUpdates.push({
-      rowIndex,
-      values: updatedPrediction,
-    });
-
+    if (oldPoints === newResult.points && oldType === newResult.type) return;
+    const upd = padRow(row, EXPECTED_COLUMNS.Predictions);
+    upd[6] = new Date().toISOString(); upd[7] = newResult.points; upd[8] = newResult.type;
+    predictionUpdates.push({ rowIndex, values: upd });
     const delta = ensureDelta();
-
     addResultToDelta(delta, { points: oldPoints, type: oldType }, -1);
     addResultToDelta(delta, newResult, 1);
   });
-
   await batchWriteRows('Predictions', predictionUpdates);
-
   if (userDeltas.size > 0) {
     const usersData = await getSheetData('Users', 'A:Z');
     const userUpdates = [];
-
     for (const [userId, delta] of userDeltas.entries()) {
-      const rowIndex = usersData.findIndex(row => {
-        return isDataRow(row, 'user_id') && String(row[0]).trim() === userId;
-      });
-
+      const rowIndex = usersData.findIndex(r => isDataRow(r, 'user_id') && String(r[0]).trim() === userId);
       if (rowIndex === -1) continue;
-
       const user = padRow(usersData[rowIndex], EXPECTED_COLUMNS.Users);
-
       user[4] = Math.max(0, toNum(user[4], 0) + delta.points);
       user[6] = Math.max(0, toNum(user[6], 0) + delta.successful);
       user[7] = Math.max(0, toNum(user[7], 0) + delta.exact);
@@ -1194,456 +327,173 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
       user[9] = Math.max(0, toNum(user[9], 0) + delta.draws);
       user[10] = Math.max(0, toNum(user[10], 0) + delta.outcomes);
       user[11] = Math.max(0, toNum(user[11], 0) + delta.misses);
-
-      userUpdates.push({
-        rowIndex,
-        values: user,
-      });
+      userUpdates.push({ rowIndex, values: user });
     }
-
     await batchWriteRows('Users', userUpdates);
   }
-
   return predictionUpdates.length;
 }
 
-// Синхронизация матчей: добавляет новые и обновляет существующие
 async function fetchUCLMatches() {
   const data = await fetchFootball(`/competitions/CL/matches?season=${SEASON}`);
   const apiMatches = data.matches || [];
-
   const matchesData = await getSheetData('Matches', 'A:J');
-
   const existingById = new Map();
-
-  matchesData.forEach((row, rowIndex) => {
-    if (!isDataRow(row, 'match_id')) return;
-
-    existingById.set(String(row[0]).trim(), {
-      row,
-      rowIndex,
-    });
-  });
-
-  const newRows = [];
-  const updates = [];
-  const recalcList = [];
-
+  matchesData.forEach((row, idx) => { if (!isDataRow(row, 'match_id')) return; existingById.set(String(row[0]).trim(), { row, rowIndex: idx }); });
+  const newRows = [], updates = [], recalcList = [];
   for (const apiMatch of apiMatches) {
     const matchId = String(apiMatch.id);
-
-    let homeTeam = translateTeam(apiMatch.homeTeam?.name || 'Unknown');
-    let awayTeam = translateTeam(apiMatch.awayTeam?.name || 'Unknown');
-
+    const homeTeam = translateTeam(apiMatch.homeTeam?.name || 'Unknown');
+    const awayTeam = translateTeam(apiMatch.awayTeam?.name || 'Unknown');
     const kickoffUtc = apiMatch.utcDate || '';
     const status = mapStatus(apiMatch.status);
     const stage = mapStage(apiMatch.stage);
-
-    const apiHomeScore = toScore(apiMatch.score?.fullTime?.home);
-    const apiAwayScore = toScore(apiMatch.score?.fullTime?.away);
-
+    const apiHome = toScore(apiMatch.score?.fullTime?.home);
+    const apiAway = toScore(apiMatch.score?.fullTime?.away);
     const existing = existingById.get(matchId);
-
     if (!existing) {
-      let homeScore = '';
-      let awayScore = '';
-      let resultUpdatedAt = '';
-
-      if (status === 'finished' && apiHomeScore !== null && apiAwayScore !== null) {
-        homeScore = apiHomeScore;
-        awayScore = apiAwayScore;
-        resultUpdatedAt = new Date().toISOString();
-      }
-
-      newRows.push([
-        matchId,
-        stage,
-        homeTeam,
-        awayTeam,
-        kickoffUtc,
-        status,
-        homeScore,
-        awayScore,
-        resultUpdatedAt,
-        'FALSE',
-      ]);
-
-      if (status === 'finished' && apiHomeScore !== null && apiAwayScore !== null) {
-        recalcList.push({
-          matchId,
-          homeScore: apiHomeScore,
-          awayScore: apiAwayScore,
-        });
-      }
-
+      let hs = '', as = '', ru = '';
+      if (status === 'finished' && apiHome !== null && apiAway !== null) { hs = apiHome; as = apiAway; ru = new Date().toISOString(); }
+      newRows.push([matchId, stage, homeTeam, awayTeam, kickoffUtc, status, hs, as, ru, 'FALSE']);
+      if (status === 'finished' && apiHome !== null && apiAway !== null) recalcList.push({ matchId, homeScore: apiHome, awayScore: apiAway });
       continue;
     }
-
     const current = padRow(existing.row, EXPECTED_COLUMNS.Matches);
-    const locked = String(current[9] || '').toUpperCase() === 'TRUE';
-
-    if (locked) continue;
-
+    if (String(current[9] || '').toUpperCase() === 'TRUE') continue;
     const oldStatus = String(current[5] || '').trim();
-    const oldHomeScore = toScore(current[6]);
-    const oldAwayScore = toScore(current[7]);
-
-    let homeScore = current[6];
-    let awayScore = current[7];
-    let resultUpdatedAt = current[8];
-    let shouldRecalculate = false;
-
-    if (status === 'finished' && apiHomeScore !== null && apiAwayScore !== null) {
-      homeScore = apiHomeScore;
-      awayScore = apiAwayScore;
-
-      if (oldStatus !== 'finished' || oldHomeScore !== apiHomeScore || oldAwayScore !== apiAwayScore) {
-        resultUpdatedAt = new Date().toISOString();
-        shouldRecalculate = true;
-      }
-    } else if (status !== 'finished') {
-      homeScore = '';
-      awayScore = '';
-      resultUpdatedAt = '';
-    }
-
-    const updated = [
-      matchId,
-      stage,
-      homeTeam,
-      awayTeam,
-      kickoffUtc,
-      status,
-      homeScore,
-      awayScore,
-      resultUpdatedAt,
-      current[9] || 'FALSE',
-    ];
-
-    if (isDifferentRow(current, updated, EXPECTED_COLUMNS.Matches)) {
-      updates.push({
-        rowIndex: existing.rowIndex,
-        values: updated,
-      });
-    }
-
-    if (shouldRecalculate) {
-      recalcList.push({
-        matchId,
-        homeScore: apiHomeScore,
-        awayScore: apiAwayScore,
-      });
-    }
+    const oldHome = toScore(current[6]), oldAway = toScore(current[7]);
+    let hs = current[6], as = current[7], ru = current[8], shouldRecalc = false;
+    if (status === 'finished' && apiHome !== null && apiAway !== null) {
+      hs = apiHome; as = apiAway;
+      if (oldStatus !== 'finished' || oldHome !== apiHome || oldAway !== apiAway) { ru = new Date().toISOString(); shouldRecalc = true; }
+    } else if (status !== 'finished') { hs = ''; as = ''; ru = ''; }
+    const updated = [matchId, stage, homeTeam, awayTeam, kickoffUtc, status, hs, as, ru, current[9] || 'FALSE'];
+    if (isDifferentRow(current, updated, EXPECTED_COLUMNS.Matches)) updates.push({ rowIndex: existing.rowIndex, values: updated });
+    if (shouldRecalc) recalcList.push({ matchId, homeScore: apiHome, awayScore: apiAway });
   }
-
   await appendRows('Matches', newRows);
   await batchWriteRows('Matches', updates);
-
-  for (const item of recalcList) {
-    await recalculatePointsForMatch(item.matchId, item.homeScore, item.awayScore);
-  }
-
-  return {
-    added: newRows.length,
-    updated: updates.length,
-    recalculated: recalcList.length,
-  };
+  for (const item of recalcList) await recalculatePointsForMatch(item.matchId, item.homeScore, item.awayScore);
+  return { added: newRows.length, updated: updates.length, recalculated: recalcList.length };
 }
 
-// Обновление завершенных матчей и пересчет очков
 async function updateFinishedMatches() {
   const data = await fetchFootball(`/competitions/CL/matches?season=${SEASON}`);
-  const apiMatches = (data.matches || []).filter(match => match.status === 'FINISHED');
-
+  const apiMatches = (data.matches || []).filter(m => m.status === 'FINISHED');
   const matchesData = await getSheetData('Matches', 'A:J');
-
   let updatedCount = 0;
-
   for (const apiMatch of apiMatches) {
     const matchId = String(apiMatch.id);
-
-    const rowIndex = matchesData.findIndex(row => {
-      return isDataRow(row, 'match_id') && String(row[0]).trim() === matchId;
-    });
-
+    const rowIndex = matchesData.findIndex(r => isDataRow(r, 'match_id') && String(r[0]).trim() === matchId);
     if (rowIndex === -1) continue;
-
     const current = padRow(matchesData[rowIndex], EXPECTED_COLUMNS.Matches);
-    const scoreLocked = String(current[9] || '').toUpperCase() === 'TRUE';
-
-    if (scoreLocked) continue;
-
-    const homeScore = toScore(apiMatch.score?.fullTime?.home);
-    const awayScore = toScore(apiMatch.score?.fullTime?.away);
-
+    if (String(current[9] || '').toUpperCase() === 'TRUE') continue;
+    const homeScore = toScore(apiMatch.score?.fullTime?.home), awayScore = toScore(apiMatch.score?.fullTime?.away);
     if (homeScore === null || awayScore === null) continue;
-
-    const currentHome = toScore(current[6]);
-    const currentAway = toScore(current[7]);
-    const currentStatus = String(current[5] || '').trim();
-
-    if (currentStatus === 'finished' && currentHome === homeScore && currentAway === awayScore) {
-      continue;
-    }
-
+    const currentHome = toScore(current[6]), currentAway = toScore(current[7]), currentStatus = String(current[5] || '').trim();
+    if (currentStatus === 'finished' && currentHome === homeScore && currentAway === awayScore) continue;
     const updated = [...current];
-
-    updated[5] = 'finished';
-    updated[6] = homeScore;
-    updated[7] = awayScore;
-    updated[8] = new Date().toISOString();
-    updated[9] = current[9] || 'FALSE';
-
+    updated[5] = 'finished'; updated[6] = homeScore; updated[7] = awayScore; updated[8] = new Date().toISOString(); updated[9] = current[9] || 'FALSE';
     await writeRow('Matches', rowIndex, updated);
     await recalculatePointsForMatch(matchId, homeScore, awayScore);
-
     updatedCount++;
   }
-
   return updatedCount;
 }
 
-async function fetchMatchEvents(matchId) {
-  const data = await fetchFootball(`/matches/${matchId}/events`);
-  return data.events || [];
-}
-
+async function fetchMatchEvents(matchId) { const data = await fetchFootball(`/matches/${matchId}/events`); return data.events || []; }
 function buildEventRows(matchId, events, homeTeam, awayTeam) {
   if (!Array.isArray(events)) return [];
-
-  const goalTypes = new Set([
-    'GOAL',
-    'PENALTY',
-    'OWN_GOAL',
-    'GOAL_PENALTY',
-    'SCORE_CHANGE',
-  ]);
-
-  const scoringEvents = events.filter(event => {
-    return event && goalTypes.has(String(event.type || '').toUpperCase());
-  });
-
-  scoringEvents.sort((a, b) => {
-    return toNum(a.minute, 0) - toNum(b.minute, 0) || toNum(a.injuryTime, 0) - toNum(b.injuryTime, 0);
-  });
-
-  let homeScore = 0;
-  let awayScore = 0;
-
+  const goalTypes = new Set(['GOAL', 'PENALTY', 'OWN_GOAL', 'GOAL_PENALTY', 'SCORE_CHANGE']);
+  const scoringEvents = events.filter(e => e && goalTypes.has(String(e.type || '').toUpperCase())).sort((a, b) => toNum(a.minute, 0) - toNum(b.minute, 0) || toNum(a.injuryTime, 0) - toNum(b.injuryTime, 0));
+  let hs = 0, as = 0;
   const rows = [];
-
   for (const event of scoringEvents) {
     const rawTeam = event.team?.name || '';
     const team = translateTeam(rawTeam);
     const player = event.player?.name || '';
-    const minute = toNum(event.minute, 0);
-    const addedTime = toNum(event.injuryTime, 0);
-
-    const normalizedTeam = String(team || rawTeam || '').toLowerCase().trim();
-    const normalizedHome = String(homeTeam || '').toLowerCase().trim();
-    const normalizedAway = String(awayTeam || '').toLowerCase().trim();
-
-    if (normalizedTeam && normalizedHome && normalizedTeam === normalizedHome) {
-      homeScore++;
-    } else if (normalizedTeam && normalizedAway && normalizedTeam === normalizedAway) {
-      awayScore++;
-    }
-
-    rows.push([
-      matchId,
-      'goal',
-      team || rawTeam,
-      minute,
-      addedTime,
-      `${homeScore}:${awayScore}`,
-      player,
-    ]);
+    const minute = toNum(event.minute, 0), addedTime = toNum(event.injuryTime, 0);
+    const nt = String(team || rawTeam || '').toLowerCase().trim();
+    const nh = String(homeTeam || '').toLowerCase().trim();
+    const na = String(awayTeam || '').toLowerCase().trim();
+    if (nt && nh && nt === nh) hs++;
+    else if (nt && na && nt === na) as++;
+    rows.push([matchId, 'goal', team || rawTeam, minute, addedTime, `${hs}:${as}`, player]);
   }
-
   return rows;
 }
-
-// Загрузка событий для завершенных матчей.
-// Матчи без голов помечаются служебной строкой, чтобы не обрабатывать их вечно.
 async function updateMatchEventsForFinished() {
   const matchesData = await getSheetData('Matches', 'A:J');
-
-  const finishedMatches = matchesData.filter(row => {
-    return isDataRow(row, 'match_id') && String(row[5] || '').trim() === 'finished';
-  });
-
+  const finishedMatches = matchesData.filter(r => isDataRow(r, 'match_id') && String(r[5] || '').trim() === 'finished');
   const existingEvents = await getSheetData('MatchEvents', 'A:G');
-
-  const existingMatchIds = new Set(
-    existingEvents
-      .filter(row => isDataRow(row, 'match_id'))
-      .map(row => String(row[0]).trim())
-  );
-
-  const matchesToProcess = finishedMatches
-    .filter(row => !existingMatchIds.has(String(row[0]).trim()))
-    .slice(0, EVENTS_BATCH_SIZE);
-
+  const existingMatchIds = new Set(existingEvents.filter(r => isDataRow(r, 'match_id')).map(r => String(r[0]).trim()));
+  const matchesToProcess = finishedMatches.filter(r => !existingMatchIds.has(String(r[0]).trim())).slice(0, EVENTS_BATCH_SIZE);
   for (const matchRow of matchesToProcess) {
     const matchId = String(matchRow[0]).trim();
     const homeTeam = String(matchRow[2] || '').trim();
     const awayTeam = String(matchRow[3] || '').trim();
-
     try {
       const events = await fetchMatchEvents(matchId);
       const rows = buildEventRows(matchId, events, homeTeam, awayTeam);
-
-      if (rows.length > 0) {
-        await appendRows('MatchEvents', rows);
-      } else {
-        await appendRows('MatchEvents', [[
-          matchId,
-          'no_events',
-          '',
-          0,
-          0,
-          '',
-          '',
-        ]]);
-      }
+      if (rows.length > 0) await appendRows('MatchEvents', rows);
+      else await appendRows('MatchEvents', [[matchId, 'no_events', '', 0, 0, '', '']]);
     } catch (error) {
       console.error(`Ошибка получения событий для матча ${matchId}:`, error.message);
-
-      if (error.status === 403 || error.status === 404) {
-        await appendRows('MatchEvents', [[
-          matchId,
-          'events_unavailable',
-          '',
-          0,
-          0,
-          '',
-          '',
-        ]]);
-      }
+      if (error.status === 403 || error.status === 404) await appendRows('MatchEvents', [[matchId, 'events_unavailable', '', 0, 0, '', '']]);
     }
-
-    if (matchRow !== matchesToProcess[matchesToProcess.length - 1]) {
-      await sleep(5000);
-    }
+    if (matchRow !== matchesToProcess[matchesToProcess.length - 1]) await sleep(5000);
   }
-
   return matchesToProcess.length;
 }
 
-// Полный безопасный пересчет всей таблицы.
-// Учитываем только последний прогноз пользователя на каждый матч.
 async function recalculateAll() {
   const usersData = await getSheetData('Users', 'A:Z');
   const predictionsData = await getSheetData('Predictions', 'A:Z');
   const matchesData = await getSheetData('Matches', 'A:J');
-
   const finishedMatches = new Map();
-
   matchesData.forEach(row => {
     if (!isDataRow(row, 'match_id')) return;
-
     const status = String(row[5] || '').trim();
     if (status !== 'finished') return;
-
-    const homeScore = toScore(row[6]);
-    const awayScore = toScore(row[7]);
-
-    if (homeScore === null || awayScore === null) return;
-
-    finishedMatches.set(String(row[0]).trim(), {
-      homeScore,
-      awayScore,
-    });
+    const hs = toScore(row[6]), as = toScore(row[7]);
+    if (hs === null || as === null) return;
+    finishedMatches.set(String(row[0]).trim(), { homeScore: hs, awayScore: as });
   });
-
   const latestMap = getLatestPredictionMap(predictionsData);
-
-  const userStats = new Map();
-  const userRowIndexById = new Map();
-
-  usersData.forEach((row, rowIndex) => {
+  const userStats = new Map(), userRowIndexById = new Map();
+  usersData.forEach((row, idx) => {
     if (!isDataRow(row, 'user_id')) return;
-
     const userId = String(row[0]).trim();
     if (!userId) return;
-
-    userRowIndexById.set(userId, rowIndex);
-
-    userStats.set(userId, {
-      totalPoints: 0,
-      totalPredictions: 0,
-      successfulPredictions: 0,
-      exactScores: 0,
-      goalDifference: 0,
-      draws: 0,
-      outcomes: 0,
-      misses: 0,
-    });
+    userRowIndexById.set(userId, idx);
+    userStats.set(userId, { totalPoints: 0, totalPredictions: 0, successfulPredictions: 0, exactScores: 0, goalDifference: 0, draws: 0, outcomes: 0, misses: 0 });
   });
-
   const predictionUpdates = [];
-
   predictionsData.forEach((row, rowIndex) => {
     if (!isDataRow(row, 'prediction_id')) return;
-
-    const userId = String(row[1] || '').trim();
-    const matchId = String(row[2] || '').trim();
-
+    const userId = String(row[1] || '').trim(), matchId = String(row[2] || '').trim();
     if (!userId || !matchId) return;
-
     const key = `${userId}|${matchId}`;
     const latest = latestMap.get(key);
-
-    const oldPoints = toNum(row[7], 0);
-    const oldType = String(row[8] || '').trim();
-
-    // Все, что не является последним прогнозом — помечаем как duplicate
-    if (!latest || rowIndex !== latest.rowIndex) {
+    const oldPoints = toNum(row[7], 0), oldType = String(row[8] || '').trim();
+    if (!latest || rowIndex !== latest.idx) {
       if (oldPoints !== 0 || oldType !== 'duplicate') {
-        const updatedPrediction = padRow(row, EXPECTED_COLUMNS.Predictions);
-
-        // Не меняем updated_at, чтобы дубль не стал случайно последним
-        updatedPrediction[7] = 0;
-        updatedPrediction[8] = 'duplicate';
-
-        predictionUpdates.push({
-          rowIndex,
-          values: updatedPrediction,
-        });
+        const upd = padRow(row, EXPECTED_COLUMNS.Predictions);
+        upd[7] = 0; upd[8] = 'duplicate';
+        predictionUpdates.push({ rowIndex, values: upd });
       }
-
       return;
     }
-
     const stats = userStats.get(userId);
-
-    if (stats) {
-      stats.totalPredictions++;
-    }
-
-    let points = 0;
-    let type = '';
-
+    if (stats) stats.totalPredictions++;
+    let points = 0, type = '';
     const finishedMatch = finishedMatches.get(matchId);
-
     if (finishedMatch) {
-      const result = calculatePoints(
-        row[3],
-        row[4],
-        finishedMatch.homeScore,
-        finishedMatch.awayScore
-      );
-
-      points = result.points;
-      type = result.type;
-
+      const result = calculatePoints(row[3], row[4], finishedMatch.homeScore, finishedMatch.awayScore);
+      points = result.points; type = result.type;
       if (stats) {
         stats.totalPoints += points;
-
-        if (points > 0) {
-          stats.successfulPredictions++;
-        }
-
+        if (points > 0) stats.successfulPredictions++;
         if (type === 'exact') stats.exactScores++;
         if (type === 'difference') stats.goalDifference++;
         if (type === 'draw') stats.draws++;
@@ -1651,958 +501,396 @@ async function recalculateAll() {
         if (type === 'miss') stats.misses++;
       }
     }
-
     if (oldPoints !== points || oldType !== type) {
-      const updatedPrediction = padRow(row, EXPECTED_COLUMNS.Predictions);
-
-      updatedPrediction[6] = new Date().toISOString();
-      updatedPrediction[7] = points;
-      updatedPrediction[8] = type;
-
-      predictionUpdates.push({
-        rowIndex,
-        values: updatedPrediction,
-      });
+      const upd = padRow(row, EXPECTED_COLUMNS.Predictions);
+      upd[6] = new Date().toISOString(); upd[7] = points; upd[8] = type;
+      predictionUpdates.push({ rowIndex, values: upd });
     }
   });
-
   const userUpdates = [];
-
   for (const [userId, stats] of userStats.entries()) {
     const rowIndex = userRowIndexById.get(userId);
     if (rowIndex === undefined) continue;
-
     const updatedUser = padRow(usersData[rowIndex], EXPECTED_COLUMNS.Users);
-
-    updatedUser[4] = stats.totalPoints;
-    updatedUser[5] = 0;
-    updatedUser[6] = stats.successfulPredictions;
-    updatedUser[7] = stats.exactScores;
-    updatedUser[8] = stats.goalDifference;
-    updatedUser[9] = stats.draws;
-    updatedUser[10] = stats.outcomes;
-    updatedUser[11] = stats.misses;
-
-    userUpdates.push({
-      rowIndex,
-      values: updatedUser,
-    });
+    updatedUser[4] = stats.totalPoints; updatedUser[5] = 0; updatedUser[6] = stats.successfulPredictions;
+    updatedUser[7] = stats.exactScores; updatedUser[8] = stats.goalDifference; updatedUser[9] = stats.draws;
+    updatedUser[10] = stats.outcomes; updatedUser[11] = stats.misses;
+    userUpdates.push({ rowIndex, values: updatedUser });
   }
-
   await batchWriteRows('Predictions', predictionUpdates);
   await batchWriteRows('Users', userUpdates);
-
   return finishedMatches.size;
 }
 
 async function getUserPredictionsResponse(userId, query = {}) {
   const matchesData = await getSheetData('Matches', 'A:J');
   const predictionsData = await getSheetData('Predictions', 'A:Z');
-
-  const matches = matchesData.filter(row => isDataRow(row, 'match_id'));
+  const matches = matchesData.filter(r => isDataRow(r, 'match_id'));
   const userPredictions = getLatestPredictionsForUser(predictionsData, userId);
-
-  let result = userPredictions
-    .map(prediction => {
-      const matchId = String(prediction[2]).trim();
-
-      const match = matches.find(item => String(item[0]).trim() === matchId);
-      if (!match) return null;
-
-      return {
-        match_id: matchId,
-        stage: match[1] || '',
-        home_team: match[2] || '',
-        away_team: match[3] || '',
-        kickoff_utc: match[4] || '',
-        status: match[5] || '',
-        home_score: toScore(match[6]),
-        away_score: toScore(match[7]),
-        predicted_home: toScore(prediction[3]),
-        predicted_away: toScore(prediction[4]),
-        points: toNum(prediction[7], 0),
-        prediction_type: prediction[8] || '',
-      };
-    })
-    .filter(Boolean);
-
+  let result = userPredictions.map(prediction => {
+    const matchId = String(prediction[2]).trim();
+    const match = matches.find(m => String(m[0]).trim() === matchId);
+    if (!match) return null;
+    return { match_id: matchId, stage: match[1] || '', home_team: match[2] || '', away_team: match[3] || '', kickoff_utc: match[4] || '', status: match[5] || '', home_score: toScore(match[6]), away_score: toScore(match[7]), predicted_home: toScore(prediction[3]), predicted_away: toScore(prediction[4]), points: toNum(prediction[7], 0), prediction_type: prediction[8] || '' };
+  }).filter(Boolean);
   result = filterPredictionResponseByType(result, query.type);
-
   const statusFilter = String(query.status || '').toLowerCase().trim();
-  if (statusFilter) {
-    result = result.filter(item => item.status === statusFilter);
-  }
-
+  if (statusFilter) result = result.filter(item => item.status === statusFilter);
   return sortPredictionsResponse(result, query.sort);
 }
 
-// ========== Telegram Long Polling ==========
+// ========== Telegram Polling (с защитой от 409) ==========
 let telegramOffset = 0;
-
 async function callTelegram(method, params) {
   const url = `${TELEGRAM_API_BASE}/bot${BOT_TOKEN}/${method}`;
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(params),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Telegram API error: ${response.status} ${text}`);
-  }
-
+  const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params) });
+  if (!response.ok) { const text = await response.text(); throw new Error(`Telegram API error: ${response.status} ${text}`); }
   return response.json();
 }
-
 function parsePredictionText(text) {
-  const clean = String(text || '')
-    .replace(/^\/predict(?:@\w+)?\s+/i, '')
-    .trim();
-
+  const clean = String(text || '').replace(/^\/predict(?:@\w+)?\s+/i, '').trim();
   const match = clean.match(/^(.+?)\s*[-–—]\s*(.+?)\s+(\d{1,2})\s*:\s*(\d{1,2})$/i);
-
   if (!match) return null;
-
-  return {
-    home: match[1].trim(),
-    away: match[2].trim(),
-    homeScore: Number(match[3]),
-    awayScore: Number(match[4]),
-  };
+  return { home: match[1].trim(), away: match[2].trim(), homeScore: Number(match[3]), awayScore: Number(match[4]) };
 }
-
 async function processTelegramMessage(msg) {
-  const chatId = msg.chat?.id;
-  const from = msg.from;
-  const text = msg.text || '';
-
+  const chatId = msg.chat?.id, from = msg.from, text = msg.text || '';
   if (!text || !from) return;
-
-  const userId = String(from.id);
-  const username = from.username || '';
-
+  const userId = String(from.id), username = from.username || '';
   const usersData = await getSheetData('Users', 'A:Z');
-
-  const existingUserIndex = usersData.findIndex(row => {
-    return isDataRow(row, 'user_id') && String(row[0]).trim() === userId;
-  });
-
+  const existingUserIndex = usersData.findIndex(row => isDataRow(row, 'user_id') && String(row[0]).trim() === userId);
   if (existingUserIndex === -1) {
     let displayName = from.first_name || username || 'User';
-
-    if (from.last_name && from.first_name) {
-      displayName = `${from.first_name} ${from.last_name}`;
-    }
-
-    await appendRows('Users', [[
-      userId,
-      username,
-      displayName,
-      new Date().toISOString(),
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-    ]]);
+    if (from.last_name && from.first_name) displayName = `${from.first_name} ${from.last_name}`;
+    await appendRows('Users', [[userId, username, displayName, new Date().toISOString(), 0, 0, 0, 0, 0, 0, 0, 0]]);
   }
-
-  const lines = text
-    .split(/\r?\n/)
-    .map(line => line.trim())
-    .filter(Boolean);
-
-  if (lines.length === 0) return;
-
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return;
   const matchesData = await getSheetData('Matches', 'A:J');
   const matches = matchesData.filter(row => isDataRow(row, 'match_id'));
-
   let savedCount = 0;
-
   for (const line of lines) {
     const parsed = parsePredictionText(line);
     if (!parsed) continue;
-
-    const homeNormalized = normalizeTeamName(parsed.home);
-    const awayNormalized = normalizeTeamName(parsed.away);
-
-    const match = matches.find(item => {
-      const home = String(item[2] || '').toLowerCase().trim();
-      const away = String(item[3] || '').toLowerCase().trim();
-
-      return home === homeNormalized.toLowerCase() && away === awayNormalized.toLowerCase();
-    });
-
+    const homeNormalized = normalizeTeamName(parsed.home), awayNormalized = normalizeTeamName(parsed.away);
+    const match = matches.find(item => String(item[2] || '').toLowerCase().trim() === homeNormalized.toLowerCase() && String(item[3] || '').toLowerCase().trim() === awayNormalized.toLowerCase());
     if (!match) continue;
-
-    const matchId = String(match[0]).trim();
-    const status = String(match[5] || '').trim();
-    const kickoff = new Date(match[4]);
-
-    if (
-      status !== 'scheduled' ||
-      !Number.isFinite(kickoff.getTime()) ||
-      Date.now() >= kickoff.getTime()
-    ) {
-      continue;
-    }
-
+    const matchId = String(match[0]).trim(), status = String(match[5] || '').trim(), kickoff = new Date(match[4]);
+    if (status !== 'scheduled' || !Number.isFinite(kickoff.getTime()) || Date.now() >= kickoff.getTime()) continue;
     const predictionsData = await getSheetData('Predictions', 'A:Z');
     const existingIndexes = [];
-
-    predictionsData.forEach((row, rowIndex) => {
-      if (
-        isDataRow(row, 'prediction_id') &&
-        String(row[1]).trim() === userId &&
-        String(row[2]).trim() === matchId
-      ) {
-        existingIndexes.push(rowIndex);
-      }
-    });
-
+    predictionsData.forEach((row, idx) => { if (isDataRow(row, 'prediction_id') && String(row[1]).trim() === userId && String(row[2]).trim() === matchId) existingIndexes.push(idx); });
     await deleteRowsByRowIndices('Predictions', existingIndexes);
-
-    await appendRows('Predictions', [[
-      `${userId}_${matchId}`,
-      userId,
-      matchId,
-      parsed.homeScore,
-      parsed.awayScore,
-      new Date().toISOString(),
-      new Date().toISOString(),
-      0,
-      '',
-    ]]);
-
+    await appendRows('Predictions', [[`${userId}_${matchId}`, userId, matchId, parsed.homeScore, parsed.awayScore, new Date().toISOString(), new Date().toISOString(), 0, '']]);
     savedCount++;
   }
-
-  if (savedCount > 0) {
-    await callTelegram('sendMessage', {
-      chat_id: chatId,
-      text: `✅ Сохранено прогнозов: ${savedCount}`,
-    });
-  }
+  if (savedCount > 0) await callTelegram('sendMessage', { chat_id: chatId, text: `✅ Сохранено прогнозов: ${savedCount}` });
 }
-
 async function startBotPolling() {
   console.log('Запуск Telegram polling...');
-
   while (true) {
     try {
-      const response = await callTelegram('getUpdates', {
-        offset: telegramOffset,
-        timeout: 30,
-        allowed_updates: ['message'],
-      });
-
+      const response = await callTelegram('getUpdates', { offset: telegramOffset, timeout: 30, allowed_updates: ['message'] });
       if (response.ok && response.result.length > 0) {
         for (const update of response.result) {
           telegramOffset = update.update_id + 1;
-
-          if (update.message) {
-            await processTelegramMessage(update.message);
-          }
+          if (update.message) await processTelegramMessage(update.message);
         }
       }
     } catch (error) {
       console.error('Ошибка polling:', error.message);
-      await sleep(5000);
+      if (error.message && error.message.includes('409')) {
+        console.log('Конфликт polling (409). Ждём 15 секунд...');
+        await sleep(15000);
+      } else {
+        await sleep(5000);
+      }
     }
-
     await sleep(1000);
   }
 }
 
-// ========== Маршруты API ==========
+// ========== Новые эндпоинты: Стрелки, График по дням, Тур (3 дня) ==========
+app.get('/api/standings-history', asyncHandler(async (req, res) => {
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const finishedMatches = matchesData.filter(row => isDataRow(row, 'match_id') && String(row[5] || '').trim() === 'finished').map(row => ({ matchId: String(row[0]).trim(), timestamp: new Date(row[8] || row[4] || '').getTime() || 0 })).sort((a, b) => a.timestamp - b.timestamp);
+  if (!finishedMatches.length) return res.json({ previousPositions: {}, currentPositions: {} });
+  const allIds = finishedMatches.map(m => m.matchId);
+  const previousIds = allIds.slice(0, -1);
+  const calc = (ids) => {
+    const set = new Set(ids);
+    const userPoints = new Map();
+    predictionsData.forEach(row => {
+      if (!isDataRow(row, 'prediction_id')) return;
+      const matchId = String(row[2] || '').trim();
+      if (!set.has(matchId)) return;
+      const userId = String(row[1] || '').trim();
+      if (String(row[8] || '').trim() === 'duplicate') return;
+      userPoints.set(userId, (userPoints.get(userId) || 0) + toNum(row[7], 0));
+    });
+    const pos = {};
+    [...userPoints.entries()].sort((a, b) => b[1] - a[1]).forEach(([uid], i) => pos[uid] = i + 1);
+    return pos;
+  };
+  res.json({ previousPositions: calc(previousIds), currentPositions: calc(allIds) });
+}));
+
+app.get('/api/user-points-history/:userId', asyncHandler(async (req, res) => {
+  const userId = String(req.params.userId || '').trim();
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const matchById = new Map();
+  matchesData.forEach(row => { if (isDataRow(row, 'match_id')) matchById.set(String(row[0]).trim(), row); });
+  const latestMap = getLatestPredictionMap(predictionsData);
+  const dailyMap = new Map();
+  for (const item of latestMap.values()) {
+    const row = predictionsData[item.idx];
+    if (!row || String(row[1] || '').trim() !== userId) continue;
+    if (String(row[8] || '').trim() === 'duplicate') continue;
+    const match = matchById.get(String(row[2] || '').trim());
+    if (!match || String(match[5] || '').trim() !== 'finished') continue;
+    const hs = toScore(match[6]), as = toScore(match[7]);
+    if (hs === null || as === null) continue;
+    const result = calculatePoints(row[3], row[4], hs, as);
+    const date = new Date(match[8] || match[4] || '');
+    if (!Number.isFinite(date.getTime())) continue;
+    const dayKey = date.toISOString().slice(0, 10);
+    dailyMap.set(dayKey, (dailyMap.get(dayKey) || 0) + result.points);
+  }
+  const history = [...dailyMap.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([date, points]) => ({ date, label: new Date(`${date}T00:00:00Z`).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', timeZone: 'UTC' }), points }));
+  res.json(history);
+}));
+
+app.get('/api/standings-last-round', asyncHandler(async (req, res) => {
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const usersData = await getSheetData('Users', 'A:Z');
+  const finishedMatches = matchesData.filter(row => isDataRow(row, 'match_id') && String(row[5] || '').trim() === 'finished').map(row => ({ matchId: String(row[0]).trim(), timestamp: new Date(row[8] || row[4] || '').getTime() || 0 })).filter(m => m.timestamp > 0).sort((a, b) => b.timestamp - a.timestamp);
+  if (!finishedMatches.length) return res.json([]);
+  const cutoff = finishedMatches[0].timestamp - (3 * 24 * 60 * 60 * 1000);
+  const roundMatchIds = new Set(finishedMatches.filter(m => m.timestamp >= cutoff).map(m => m.matchId));
+  const latestMap = getLatestPredictionMap(predictionsData);
+  const perUser = new Map();
+  for (const item of latestMap.values()) {
+    const row = predictionsData[item.idx];
+    if (!row) continue;
+    const matchId = String(row[2] || '').trim();
+    if (!roundMatchIds.has(matchId) || String(row[8] || '').trim() === 'duplicate') continue;
+    const uid = String(row[1] || '').trim();
+    if (!uid) continue;
+    const match = matchesData.find(r => isDataRow(r, 'match_id') && String(r[0]).trim() === matchId);
+    if (!match) continue;
+    const hs = toScore(match[6]), as = toScore(match[7]);
+    if (hs === null || as === null) continue;
+    const result = calculatePoints(row[3], row[4], hs, as);
+    if (!perUser.has(uid)) perUser.set(uid, { points: 0, exact: 0, difference: 0, draw: 0, outcome: 0, miss: 0 });
+    const stats = perUser.get(uid);
+    stats.points += result.points;
+    if (result.type === 'exact') stats.exact++;
+    else if (result.type === 'difference') stats.difference++;
+    else if (result.type === 'draw') stats.draw++;
+    else if (result.type === 'outcome') stats.outcome++;
+    else if (result.type === 'miss') stats.miss++;
+  }
+  const userMap = new Map();
+  usersData.forEach(row => { if (isDataRow(row, 'user_id')) userMap.set(String(row[0]).trim(), row[2] || row[1] || String(row[0]).trim()); });
+  const table = [...perUser.entries()].map(([uid, stats]) => ({ userId: uid, displayName: userMap.get(uid) || uid, ...stats })).sort((a, b) => b.points - a.points || b.exact - a.exact);
+  table.forEach((row, i) => row.position = i + 1);
+  res.json(table);
+}));
+
+// ========== Основные маршруты ==========
 app.post('/api/auth', asyncHandler(async (req, res) => {
   const initDataString = req.body.initData;
-
   let user = null;
-
   if (initDataString) {
-    if (BOT_TOKEN && !verifyTelegramInitData(initDataString)) {
-      return res.status(403).json({ error: 'Invalid initData' });
-    }
-
-    try {
-      const params = new URLSearchParams(initDataString);
-      user = JSON.parse(params.get('user') || 'null');
-    } catch (error) {
-      user = null;
-    }
+    if (BOT_TOKEN && !verifyTelegramInitData(initDataString)) return res.status(403).json({ error: 'Invalid initData' });
+    try { user = JSON.parse(new URLSearchParams(initDataString).get('user') || 'null'); } catch { user = null; }
   }
-
-  if (!user?.id && ALLOW_PLAIN_USER_ID && isNotEmpty(req.body.userId)) {
-    user = {
-      id: req.body.userId,
-      username: req.body.username || '',
-      first_name: req.body.firstName || '',
-      last_name: req.body.lastName || '',
-    };
-  }
-
-  if (!user?.id) {
-    return res.status(400).json({ error: 'userId required' });
-  }
-
+  if (!user?.id && ALLOW_PLAIN_USER_ID && isNotEmpty(req.body.userId)) user = { id: req.body.userId, username: req.body.username || '', first_name: req.body.firstName || '', last_name: req.body.lastName || '' };
+  if (!user?.id) return res.status(400).json({ error: 'userId required' });
   const userId = String(user.id).trim();
-
   const usersData = await getSheetData('Users', 'A:Z');
-
-  const existingUser = usersData.find(row => {
-    return isDataRow(row, 'user_id') && String(row[0]).trim() === userId;
-  });
-
+  const existingUser = usersData.find(row => isDataRow(row, 'user_id') && String(row[0]).trim() === userId);
   if (!existingUser) {
     let displayName = user.first_name || user.username || 'User';
-
-    if (user.last_name && user.first_name) {
-      displayName = `${user.first_name} ${user.last_name}`;
-    }
-
-    await appendRows('Users', [[
-      userId,
-      user.username || '',
-      displayName,
-      new Date().toISOString(),
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-    ]]);
-
-    return res.json({
-      userId,
-      displayName,
-    });
+    if (user.last_name && user.first_name) displayName = `${user.first_name} ${user.last_name}`;
+    await appendRows('Users', [[userId, user.username || '', displayName, new Date().toISOString(), 0, 0, 0, 0, 0, 0, 0, 0]]);
+    return res.json({ userId, displayName });
   }
-
-  return res.json({
-    userId,
-    displayName: existingUser[2] || existingUser[1] || 'User',
-  });
+  return res.json({ userId, displayName: existingUser[2] || existingUser[1] || 'User' });
 }));
 
 app.get('/api/matches', asyncHandler(async (req, res) => {
   const userId = req.query.userId ? String(req.query.userId).trim() : null;
-
   const matchesData = await getSheetData('Matches', 'A:J');
   const matches = matchesData.filter(row => isDataRow(row, 'match_id'));
-
   let userPredictions = [];
-
-  if (userId) {
-    const predictionsData = await getSheetData('Predictions', 'A:Z');
-    userPredictions = getLatestPredictionsForUser(predictionsData, userId);
-  }
-
+  if (userId) userPredictions = getLatestPredictionsForUser(await getSheetData('Predictions', 'A:Z'), userId);
   let result = matches.map(row => {
     const matchId = String(row[0]).trim();
-
-    const userPrediction = userPredictions.find(prediction => {
-      return String(prediction[2]).trim() === matchId;
-    });
-
-    return {
-      match_id: matchId,
-      stage: row[1] || '',
-      home_team: row[2] || '',
-      away_team: row[3] || '',
-      kickoff_utc: row[4] || '',
-      status: row[5] || '',
-      home_score: toScore(row[6]),
-      away_score: toScore(row[7]),
-      user_has_predicted: Boolean(userPrediction),
-      user_prediction: userPrediction
-        ? {
-            home: toScore(userPrediction[3]),
-            away: toScore(userPrediction[4]),
-          }
-        : null,
-    };
+    const userPrediction = userPredictions.find(p => String(p[2]).trim() === matchId);
+    return { match_id: matchId, stage: row[1] || '', home_team: row[2] || '', away_team: row[3] || '', kickoff_utc: row[4] || '', status: row[5] || '', home_score: toScore(row[6]), away_score: toScore(row[7]), user_has_predicted: Boolean(userPrediction), user_prediction: userPrediction ? { home: toScore(userPrediction[3]), away: toScore(userPrediction[4]) } : null };
   });
-
   const includeFinished = String(req.query.includeFinished || 'true').toLowerCase() !== 'false';
   const statusFilter = String(req.query.status || '').toLowerCase().trim();
-
-  if (!includeFinished) {
-    result = result.filter(item => item.status !== 'finished');
-  }
-
-  if (statusFilter) {
-    result = result.filter(item => item.status === statusFilter);
-  }
-
-  result.sort((a, b) => {
-    const dateA = new Date(a.kickoff_utc).getTime() || Infinity;
-    const dateB = new Date(b.kickoff_utc).getTime() || Infinity;
-    return dateA - dateB;
-  });
-
+  if (!includeFinished) result = result.filter(item => item.status !== 'finished');
+  if (statusFilter) result = result.filter(item => item.status === statusFilter);
+  result.sort((a, b) => (new Date(a.kickoff_utc).getTime() || Infinity) - (new Date(b.kickoff_utc).getTime() || Infinity));
   res.json(result);
 }));
 
 app.get('/api/my-predictions', asyncHandler(async (req, res) => {
   const userId = req.query.userId ? String(req.query.userId).trim() : '';
-
-  if (!userId) {
-    return res.status(400).json({ error: 'userId required' });
-  }
-
-  const matchesData = await getSheetData('Matches', 'A:J');
-  const predictionsData = await getSheetData('Predictions', 'A:Z');
-
-  const matches = matchesData.filter(row => isDataRow(row, 'match_id'));
-  const userPredictions = getLatestPredictionsForUser(predictionsData, userId);
-
-  let result = userPredictions
-    .map(prediction => {
-      const matchId = String(prediction[2]).trim();
-
-      const match = matches.find(item => String(item[0]).trim() === matchId);
-      if (!match) return null;
-
-      return {
-        match_id: matchId,
-        stage: match[1] || '',
-        home_team: match[2] || '',
-        away_team: match[3] || '',
-        kickoff_utc: match[4] || '',
-        status: match[5] || '',
-        home_score: toScore(match[6]),
-        away_score: toScore(match[7]),
-        predicted_home: toScore(prediction[3]),
-        predicted_away: toScore(prediction[4]),
-        points: toNum(prediction[7], 0),
-        prediction_type: prediction[8] || '',
-      };
-    })
-    .filter(Boolean);
-
-  result = filterPredictionResponseByType(result, req.query.type);
-
-  const statusFilter = String(req.query.status || '').toLowerCase().trim();
-  if (statusFilter) {
-    result = result.filter(item => item.status === statusFilter);
-  }
-
-  result = sortPredictionsResponse(result, req.query.sort);
-
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  const result = await getUserPredictionsResponse(userId, req.query);
   res.json(result);
 }));
 
 app.get('/api/user-predictions/:userId', asyncHandler(async (req, res) => {
   const userId = String(req.params.userId || '').trim();
-
-  if (!userId) {
-    return res.status(400).json({ error: 'userId required' });
-  }
-
-  const result = await getUserPredictionsResponse(userId, req.query);
-  res.json(result);
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  res.json(await getUserPredictionsResponse(userId, req.query));
 }));
 
 app.post('/api/predictions', asyncHandler(async (req, res) => {
   const userId = extractUserId(req);
   const { matchId, predictedHome, predictedAway } = req.body;
-
-  if (!userId || !matchId || predictedHome === undefined || predictedAway === undefined) {
-    return res.status(400).json({ error: 'Missing parameters' });
-  }
-
+  if (!userId || !matchId || predictedHome === undefined || predictedAway === undefined) return res.status(400).json({ error: 'Missing parameters' });
   const matchesData = await getSheetData('Matches', 'A:J');
-
-  const matchRowIndex = matchesData.findIndex(row => {
-    return isDataRow(row, 'match_id') && String(row[0]).trim() === String(matchId).trim();
-  });
-
-  if (matchRowIndex === -1) {
-    return res.status(404).json({ error: 'Match not found' });
-  }
-
+  const matchRowIndex = matchesData.findIndex(row => isDataRow(row, 'match_id') && String(row[0]).trim() === String(matchId).trim());
+  if (matchRowIndex === -1) return res.status(404).json({ error: 'Match not found' });
   const match = padRow(matchesData[matchRowIndex], EXPECTED_COLUMNS.Matches);
-
-  const status = String(match[5] || '').trim();
-  const kickoff = new Date(match[4]);
-
-  if (status !== 'scheduled') {
-    return res.status(400).json({ error: 'Match is not available for prediction' });
-  }
-
-  if (!Number.isFinite(kickoff.getTime()) || Date.now() >= kickoff.getTime()) {
-    return res.status(400).json({ error: 'Match already started' });
-  }
-
-  const pHome = toScore(predictedHome);
-  const pAway = toScore(predictedAway);
-
-  if (
-    pHome === null ||
-    pAway === null ||
-    pHome < 0 ||
-    pAway < 0 ||
-    pHome > 20 ||
-    pAway > 20
-  ) {
-    return res.status(400).json({ error: 'Invalid score' });
-  }
-
+  const status = String(match[5] || '').trim(), kickoff = new Date(match[4]);
+  if (status !== 'scheduled') return res.status(400).json({ error: 'Match is not available for prediction' });
+  if (!Number.isFinite(kickoff.getTime()) || Date.now() >= kickoff.getTime()) return res.status(400).json({ error: 'Match already started' });
+  const pHome = toScore(predictedHome), pAway = toScore(predictedAway);
+  if (pHome === null || pAway === null || pHome < 0 || pAway < 0 || pHome > 20 || pAway > 20) return res.status(400).json({ error: 'Invalid score' });
   const predictionsData = await getSheetData('Predictions', 'A:Z');
   const existingIndexes = [];
-
-  predictionsData.forEach((row, rowIndex) => {
-    if (
-      isDataRow(row, 'prediction_id') &&
-      String(row[1]).trim() === String(userId).trim() &&
-      String(row[2]).trim() === String(matchId).trim()
-    ) {
-      existingIndexes.push(rowIndex);
-    }
-  });
-
+  predictionsData.forEach((row, rowIndex) => { if (isDataRow(row, 'prediction_id') && String(row[1]).trim() === String(userId).trim() && String(row[2]).trim() === String(matchId).trim()) existingIndexes.push(rowIndex); });
   await deleteRowsByRowIndices('Predictions', existingIndexes);
-
-  await appendRows('Predictions', [[
-    `${userId}_${matchId}`,
-    userId,
-    matchId,
-    pHome,
-    pAway,
-    new Date().toISOString(),
-    new Date().toISOString(),
-    0,
-    '',
-  ]]);
-
+  await appendRows('Predictions', [[`${userId}_${matchId}`, userId, matchId, pHome, pAway, new Date().toISOString(), new Date().toISOString(), 0, '']]);
   res.json({ success: true });
 }));
 
 app.post('/api/admin/match-result', requireAdmin, asyncHandler(async (req, res) => {
   const { matchId, homeScore, awayScore } = req.body;
-
-  if (!matchId || homeScore === undefined || awayScore === undefined) {
-    return res.status(400).json({ error: 'Missing parameters' });
-  }
-
-  const hScore = toScore(homeScore);
-  const aScore = toScore(awayScore);
-
-  if (
-    hScore === null ||
-    aScore === null ||
-    hScore < 0 ||
-    aScore < 0 ||
-    hScore > 20 ||
-    aScore > 20
-  ) {
-    return res.status(400).json({ error: 'Invalid score' });
-  }
-
+  if (!matchId || homeScore === undefined || awayScore === undefined) return res.status(400).json({ error: 'Missing parameters' });
+  const hScore = toScore(homeScore), aScore = toScore(awayScore);
+  if (hScore === null || aScore === null || hScore < 0 || aScore < 0 || hScore > 20 || aScore > 20) return res.status(400).json({ error: 'Invalid score' });
   const matchesData = await getSheetData('Matches', 'A:J');
-
-  const rowIndex = matchesData.findIndex(row => {
-    return isDataRow(row, 'match_id') && String(row[0]).trim() === String(matchId).trim();
-  });
-
-  if (rowIndex === -1) {
-    return res.status(404).json({ error: 'Match not found' });
-  }
-
+  const rowIndex = matchesData.findIndex(row => isDataRow(row, 'match_id') && String(row[0]).trim() === String(matchId).trim());
+  if (rowIndex === -1) return res.status(404).json({ error: 'Match not found' });
   const updatedMatch = padRow(matchesData[rowIndex], EXPECTED_COLUMNS.Matches);
-
-  updatedMatch[5] = 'finished';
-  updatedMatch[6] = hScore;
-  updatedMatch[7] = aScore;
-  updatedMatch[8] = new Date().toISOString();
-  updatedMatch[9] = 'TRUE';
-
+  updatedMatch[5] = 'finished'; updatedMatch[6] = hScore; updatedMatch[7] = aScore; updatedMatch[8] = new Date().toISOString(); updatedMatch[9] = 'TRUE';
   await writeRow('Matches', rowIndex, updatedMatch);
   await recalculatePointsForMatch(matchId, hScore, aScore);
-
-  res.json({
-    success: true,
-    processed: true,
-  });
+  res.json({ success: true, processed: true });
 }));
 
 app.get('/api/match-predictions/:matchId', asyncHandler(async (req, res) => {
   const matchId = String(req.params.matchId || '').trim();
-
   const predictionsData = await getSheetData('Predictions', 'A:Z');
   const latestMap = getLatestPredictionMap(predictionsData);
-
-  const matchPredictions = [...latestMap.values()]
-    .map(item => predictionsData[item.rowIndex])
-    .filter(row => row && String(row[2] || '').trim() === matchId);
-
+  const matchPredictions = [...latestMap.values()].map(item => predictionsData[item.idx]).filter(row => row && String(row[2] || '').trim() === matchId);
   const usersData = await getSheetData('Users', 'A:Z');
-
   const userMap = new Map();
-
-  usersData.forEach(row => {
-    if (!isDataRow(row, 'user_id')) return;
-
-    const userId = String(row[0]).trim();
-    const displayName = row[2] || row[1] || userId;
-
-    userMap.set(userId, displayName);
-  });
-
-  const result = matchPredictions.map(prediction => ({
-    userId: String(prediction[1] || '').trim(),
-    displayName: userMap.get(String(prediction[1] || '').trim()) || prediction[1],
-    predictedHome: toScore(prediction[3]),
-    predictedAway: toScore(prediction[4]),
-    points: toNum(prediction[7], 0),
-    predictionType: prediction[8] || '',
-  }));
-
-  res.json(result);
+  usersData.forEach(row => { if (isDataRow(row, 'user_id')) userMap.set(String(row[0]).trim(), row[2] || row[1] || String(row[0]).trim()); });
+  res.json(matchPredictions.map(prediction => ({ userId: String(prediction[1] || '').trim(), displayName: userMap.get(String(prediction[1] || '').trim()) || prediction[1], predictedHome: toScore(prediction[3]), predictedAway: toScore(prediction[4]), points: toNum(prediction[7], 0), predictionType: prediction[8] || '' })));
 }));
 
 app.get('/api/match-events/:matchId', asyncHandler(async (req, res) => {
   const matchId = String(req.params.matchId || '').trim();
-
   const eventsData = await getSheetData('MatchEvents', 'A:G');
-
-  const matchEvents = eventsData.filter(row => {
-    if (!isDataRow(row, 'match_id')) return false;
-    if (String(row[0]).trim() !== matchId) return false;
-
-    const eventType = String(row[1] || '').trim();
-    return eventType !== 'no_events' && eventType !== 'events_unavailable';
-  });
-
-  const result = matchEvents.map(event => ({
-    matchId: String(event[0]).trim(),
-    eventType: event[1] || '',
-    team: event[2] || '',
-    minute: toNum(event[3], 0),
-    addedTime: toNum(event[4], 0),
-    scoreAfterEvent: event[5] || '',
-    player: event[6] || '',
-  }));
-
-  result.sort((a, b) => {
-    return a.minute - b.minute || a.addedTime - b.addedTime;
-  });
-
+  const matchEvents = eventsData.filter(row => isDataRow(row, 'match_id') && String(row[0]).trim() === matchId && String(row[1] || '').trim() !== 'no_events' && String(row[1] || '').trim() !== 'events_unavailable');
+  const result = matchEvents.map(event => ({ matchId: String(event[0]).trim(), eventType: event[1] || '', team: event[2] || '', minute: toNum(event[3], 0), addedTime: toNum(event[4], 0), scoreAfterEvent: event[5] || '', player: event[6] || '' }));
+  result.sort((a, b) => a.minute - b.minute || a.addedTime - b.addedTime);
   res.json(result);
 }));
 
 app.get('/api/match-odds/:matchId', asyncHandler(async (req, res) => {
-  if (!ODDS_API_KEY) {
-    return res.json({
-      enabled: false,
-      odds: null,
-    });
-  }
-
+  if (!ODDS_API_KEY) return res.json({ enabled: false, odds: null });
   const matchId = String(req.params.matchId || '').trim();
-
   const matchesData = await getSheetData('Matches', 'A:J');
-
-  const matchRow = matchesData.find(row => {
-    return isDataRow(row, 'match_id') && String(row[0]).trim() === matchId;
-  });
-
-  if (!matchRow) {
-    return res.status(404).json({ error: 'Match not found' });
-  }
-
-  const status = String(matchRow[5] || '').trim();
-
-  if (status !== 'scheduled') {
-    return res.json({
-      enabled: true,
-      odds: null,
-    });
-  }
-
+  const matchRow = matchesData.find(row => isDataRow(row, 'match_id') && String(row[0]).trim() === matchId);
+  if (!matchRow) return res.status(404).json({ error: 'Match not found' });
+  if (String(matchRow[5] || '').trim() !== 'scheduled') return res.json({ enabled: true, odds: null });
   const kickoffTime = new Date(matchRow[4] || '').getTime();
-
   const homeApi = String(storedTeamToApiTeam(matchRow[2]) || '').toLowerCase().trim();
   const awayApi = String(storedTeamToApiTeam(matchRow[3]) || '').toLowerCase().trim();
-
-  if (!homeApi || !awayApi) {
-    return res.json({
-      enabled: true,
-      odds: null,
-    });
-  }
-
+  if (!homeApi || !awayApi) return res.json({ enabled: true, odds: null });
   const events = await fetchOddsEvents();
-
-  let selectedEvent = null;
-  let swapped = false;
-
+  let selectedEvent = null, swapped = false;
   for (const event of events) {
     const eventTime = new Date(event.commence_time || '').getTime();
-
-    if (
-      Number.isFinite(kickoffTime) &&
-      Number.isFinite(eventTime) &&
-      Math.abs(eventTime - kickoffTime) > 4 * 60 * 60 * 1000
-    ) {
-      continue;
-    }
-
+    if (Number.isFinite(kickoffTime) && Number.isFinite(eventTime) && Math.abs(eventTime - kickoffTime) > 4 * 60 * 60 * 1000) continue;
     const eventHome = String(findOurApiTeamName(event.home_team) || '').toLowerCase().trim();
     const eventAway = String(findOurApiTeamName(event.away_team) || '').toLowerCase().trim();
-
-    if (eventHome === homeApi && eventAway === awayApi) {
-      selectedEvent = event;
-      swapped = false;
-      break;
-    }
-
-    if (eventHome === awayApi && eventAway === homeApi) {
-      selectedEvent = event;
-      swapped = true;
-      break;
-    }
+    if (eventHome === homeApi && eventAway === awayApi) { selectedEvent = event; swapped = false; break; }
+    if (eventHome === awayApi && eventAway === homeApi) { selectedEvent = event; swapped = true; break; }
   }
-
-  if (!selectedEvent) {
-    return res.json({
-      enabled: true,
-      odds: null,
-    });
-  }
-
+  if (!selectedEvent) return res.json({ enabled: true, odds: null });
   const odds = getOddsFromEvent(selectedEvent);
-
-  if (!odds) {
-    return res.json({
-      enabled: true,
-      odds: null,
-    });
-  }
-
-  if (swapped) {
-    return res.json({
-      enabled: true,
-      odds: {
-        home: odds.away,
-        draw: odds.draw,
-        away: odds.home,
-        bookmakers: odds.bookmakers,
-      },
-    });
-  }
-
-  return res.json({
-    enabled: true,
-    odds,
-  });
+  if (!odds) return res.json({ enabled: true, odds: null });
+  if (swapped) return res.json({ enabled: true, odds: { home: odds.away, draw: odds.draw, away: odds.home, bookmakers: odds.bookmakers } });
+  return res.json({ enabled: true, odds });
 }));
 
 app.get('/api/standings', asyncHandler(async (req, res) => {
   const usersData = await getSheetData('Users', 'A:Z');
-
   const users = usersData.filter(row => isDataRow(row, 'user_id'));
-
-  const table = users
-    .map(row => ({
-      userId: String(row[0] || '').trim(),
-      username: row[1] || '',
-      displayName: row[2] || row[1] || 'User',
-      registrationDate: row[3] || '',
-      totalPoints: toNum(row[4], 0),
-      successfulPredictions: toNum(row[6], 0),
-      exactScores: toNum(row[7], 0),
-      goalDifference: toNum(row[8], 0),
-      draws: toNum(row[9], 0),
-      outcomes: toNum(row[10], 0),
-      misses: toNum(row[11], 0),
-    }))
-    .filter(user => user.userId);
-
+  const table = users.map(row => ({ userId: String(row[0] || '').trim(), username: row[1] || '', displayName: row[2] || row[1] || 'User', registrationDate: row[3] || '', totalPoints: toNum(row[4], 0), successfulPredictions: toNum(row[6], 0), exactScores: toNum(row[7], 0), goalDifference: toNum(row[8], 0), draws: toNum(row[9], 0), outcomes: toNum(row[10], 0), misses: toNum(row[11], 0) })).filter(user => user.userId);
   const sortBy = String(req.query.sortBy || '').toLowerCase().trim();
   const requestedOrder = String(req.query.order || '').toLowerCase().trim();
+  const sortableFields = { points: 'totalPoints', totalpoints: 'totalPoints', exact: 'exactScores', exactscores: 'exactScores', difference: 'goalDifference', goaldifference: 'goalDifference', draws: 'draws', outcomes: 'outcomes', misses: 'misses', successful: 'successfulPredictions', successfulpredictions: 'successfulPredictions' };
+  
+  const hasActivity = user => (toNum(user.successfulPredictions, 0) + toNum(user.exactScores, 0) + toNum(user.goalDifference, 0) + toNum(user.draws, 0) + toNum(user.outcomes, 0) + toNum(user.misses, 0)) > 0;
 
-  const sortableFields = {
-    points: 'totalPoints',
-    totalpoints: 'totalPoints',
-    exact: 'exactScores',
-    exactscores: 'exactScores',
-    difference: 'goalDifference',
-    goaldifference: 'goalDifference',
-    draws: 'draws',
-    outcomes: 'outcomes',
-    misses: 'misses',
-    successful: 'successfulPredictions',
-    successfulpredictions: 'successfulPredictions',
-  };
-
-  if (sortBy && sortableFields[sortBy]) {
-    const field = sortableFields[sortBy];
-
-    const order = requestedOrder
-      ? (requestedOrder === 'asc' ? 1 : -1)
-      : (sortBy === 'misses' ? 1 : -1);
-
+  if (sortBy === 'misses') {
+    const order = requestedOrder === 'desc' ? -1 : 1;
     table.sort((a, b) => {
-      return ((a[field] || 0) - (b[field] || 0)) * order ||
-        String(a.userId).localeCompare(String(b.userId), 'ru', { numeric: true });
+      const aActive = hasActivity(a) ? 0 : 1;
+      const bActive = hasActivity(b) ? 0 : 1;
+      if (aActive !== bActive) return aActive - bActive;
+      if (a.misses !== b.misses) return (a.misses - b.misses) * order;
+      if (b.totalPoints !== a.totalPoints) return b.totalPoints - a.totalPoints;
+      return String(a.userId).localeCompare(String(b.userId), 'ru', { numeric: true });
     });
+  } else if (sortBy && sortableFields[sortBy]) {
+    const field = sortableFields[sortBy];
+    const order = requestedOrder ? (requestedOrder === 'asc' ? 1 : -1) : (sortBy === 'misses' ? 1 : -1);
+    table.sort((a, b) => ((a[field] || 0) - (b[field] || 0)) * order || String(a.userId).localeCompare(String(b.userId), 'ru', { numeric: true }));
   } else {
-    // Дефолдная турнирная сортировка:
-    // максимальные очки -> точные -> разница -> ничьи -> исходы -> минимальные промахи
     table.sort((a, b) => {
       if (b.totalPoints !== a.totalPoints) return b.totalPoints - a.totalPoints;
       if (b.exactScores !== a.exactScores) return b.exactScores - a.exactScores;
       if (b.goalDifference !== a.goalDifference) return b.goalDifference - a.goalDifference;
       if (b.draws !== a.draws) return b.draws - a.draws;
       if (b.outcomes !== a.outcomes) return b.outcomes - a.outcomes;
-
       if (a.misses !== b.misses) return a.misses - b.misses;
-
-      if (b.successfulPredictions !== a.successfulPredictions) {
-        return b.successfulPredictions - a.successfulPredictions;
-      }
-
+      if (b.successfulPredictions !== a.successfulPredictions) return b.successfulPredictions - a.successfulPredictions;
       return String(a.userId).localeCompare(String(b.userId), 'ru', { numeric: true });
     });
   }
-
-  table.forEach((row, index) => {
-    row.position = index + 1;
-  });
-
+  table.forEach((row, index) => { row.position = index + 1; });
   res.json(table);
 }));
 
-app.post('/api/admin/sync-matches', requireAdmin, asyncHandler(async (req, res) => {
-  try {
-    const result = await fetchUCLMatches();
+app.post('/api/admin/sync-matches', requireAdmin, asyncHandler(async (req, res) => { try { res.json({ success: true, ...(await fetchUCLMatches()) }); } catch (e) { res.status(500).json({ success: false, error: e.message }); } }));
+app.post('/api/admin/update-results', requireAdmin, asyncHandler(async (req, res) => { try { res.json({ success: true, updated: await updateFinishedMatches() }); } catch (e) { res.status(500).json({ success: false, error: e.message }); } }));
+app.post('/api/admin/update-events', requireAdmin, asyncHandler(async (req, res) => { try { res.json({ success: true, processed: await updateMatchEventsForFinished() }); } catch (e) { res.status(500).json({ success: false, error: e.message }); } }));
+app.post('/api/admin/recalculate-all', requireAdmin, asyncHandler(async (req, res) => { try { res.json({ success: true, processed: await recalculateAll() }); } catch (e) { res.status(500).json({ success: false, error: e.message }); } }));
 
-    res.json({
-      success: true,
-      ...result,
-    });
-  } catch (error) {
-    console.error('Sync error:', error);
+app.use((error, req, res, next) => { console.error(error); res.status(500).json({ error: 'Internal server error' }); });
 
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-}));
-
-app.post('/api/admin/update-results', requireAdmin, asyncHandler(async (req, res) => {
-  try {
-    const updated = await updateFinishedMatches();
-
-    res.json({
-      success: true,
-      updated,
-    });
-  } catch (error) {
-    console.error('Update results error:', error);
-
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-}));
-
-app.post('/api/admin/update-events', requireAdmin, asyncHandler(async (req, res) => {
-  try {
-    const processed = await updateMatchEventsForFinished();
-
-    res.json({
-      success: true,
-      processed,
-    });
-  } catch (error) {
-    console.error('Update events error:', error);
-
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-}));
-
-app.post('/api/admin/recalculate-all', requireAdmin, asyncHandler(async (req, res) => {
-  try {
-    const processedMatches = await recalculateAll();
-
-    res.json({
-      success: true,
-      processed: processedMatches,
-    });
-  } catch (error) {
-    console.error('Recalculate all error:', error);
-
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-}));
-
-// Глобальный обработчик ошибок
-app.use((error, req, res, next) => {
-  console.error(error);
-  res.status(500).json({ error: 'Internal server error' });
-});
-
-// ========== Автоматическая синхронизация ==========
 let syncInProgress = false;
-
 async function scheduledSync() {
   if (syncInProgress) return;
-
   syncInProgress = true;
-
-  try {
-    console.log('Scheduled sync started');
-
-    await fetchUCLMatches();
-    await updateFinishedMatches();
-    await updateMatchEventsForFinished();
-
-    console.log('Scheduled sync finished');
-  } catch (error) {
-    console.error('Scheduled sync error:', error);
-  } finally {
-    syncInProgress = false;
-  }
+  try { await fetchUCLMatches(); await updateFinishedMatches(); await updateMatchEventsForFinished(); } catch (e) { console.error(e); } finally { syncInProgress = false; }
 }
-
-if (AUTO_SYNC && FOOTBALL_DATA_API_KEY) {
-  setTimeout(() => {
-    scheduledSync().catch(console.error);
-  }, 10000);
-
-  setInterval(() => {
-    scheduledSync().catch(console.error);
-  }, SYNC_INTERVAL_MS);
-}
-
-// ========== Запуск сервера ==========
-app.listen(process.env.PORT || 3000, () => {
-  console.log(`Server running on port ${process.env.PORT || 3000}`);
-
-  if (BOT_TOKEN) {
-    startBotPolling().catch(error => {
-      console.error('Ошибка в polling цикле:', error);
-    });
-  }
-});
+if (AUTO_SYNC && FOOTBALL_DATA_API_KEY) { setTimeout(() => scheduledSync().catch(console.error), 10000); setInterval(() => scheduledSync().catch(console.error), SYNC_INTERVAL_MS); }
+app.listen(process.env.PORT || 3000, () => { console.log(`Server running on port ${process.env.PORT || 3000}`); if (BOT_TOKEN) startBotPolling().catch(console.error); });
