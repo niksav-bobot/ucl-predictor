@@ -345,7 +345,19 @@ function extractAuthenticatedUser(req) {
   }
   return null;
 }
-function extractUserId(req) { return extractAuthenticatedUser(req)?.id ?? null; }
+
+// FIX: admin bypass — при наличии x-admin-api-key разрешаем userId в теле без initData
+function extractUserId(req) {
+  const u = extractAuthenticatedUser(req);
+  if (u?.id) return u.id;
+  const adminKey = req.headers['x-admin-api-key'] || req.body?.apiKey;
+  if (ADMIN_API_KEY && adminKey === ADMIN_API_KEY) {
+    const uid = req.body?.userId || req.query?.userId;
+    if (isNotEmpty(uid)) return String(uid).trim();
+  }
+  return null;
+}
+
 function requireAdmin(req, res, next) {
   const key = req.headers['x-admin-api-key'] || req.body?.apiKey;
   if (ADMIN_API_KEY && key === ADMIN_API_KEY) return next();
@@ -355,7 +367,6 @@ function requireAdmin(req, res, next) {
 }
 const asyncHandler = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-// ========== Команды и переводы ==========
 const teamTranslations = { 'Real Madrid CF': 'Реал Мадрид', 'FC Barcelona': 'Барселона', 'Manchester City FC': 'Манчестер Сити', 'Liverpool FC': 'Ливерпуль', 'FC Bayern München': 'Бавария', 'Paris Saint-Germain FC': 'ПСЖ', 'Juventus FC': 'Ювентус', 'AC Milan': 'Милан', 'Chelsea FC': 'Челси', 'Arsenal FC': 'Арсенал', 'Borussia Dortmund': 'Боруссия Дортмунд', 'Club Atlético de Madrid': 'Атлетико Мадрид', 'FC Internazionale Milano': 'Интер', 'SSC Napoli': 'Наполи', 'FC Porto': 'Порту', 'SL Benfica': 'Бенфика', 'AFC Ajax': 'Аякс', 'Olympique Lyonnais': 'Лион', 'AS Monaco FC': 'Монако', 'FC Red Bull Salzburg': 'Зальцбург', 'FK Shakhtar Donetsk': 'Шахтер', 'GNK Dinamo Zagreb': 'Динамо Загреб', 'Celtic FC': 'Селтик', 'Rangers FC': 'Рейнджерс', 'Club Brugge KV': 'Брюгге', 'Galatasaray SK': 'Галатасарай', 'Fenerbahçe SK': 'Фенербахче', 'Olympiacos FC': 'Олимпиакос', 'AEK Athens FC': 'АЕК', 'Maccabi Haifa FC': 'Маккаби Хайфа', 'FC København': 'Копенгаген', 'BSC Young Boys': 'Янг Бойз', 'FK Crvena Zvezda': 'Црвена Звезда', 'Racing Club de Lens': 'Ланс', 'Real Sociedad de Fútbol': 'Реал Сосьедад', 'PSV': 'ПСВ', 'Feyenoord Rotterdam': 'Фейеноорд', 'Sporting CP': 'Спортинг', 'Sporting Clube de Portugal': 'Спортинг', 'FC Viktoria Plzeň': 'Виктория Пльзень', 'Stade Brestois 29': 'Брест', 'VfB Stuttgart': 'Штутгарт', 'Aston Villa FC': 'Астон Вилла', 'Bologna FC 1909': 'Болонья', 'Girona FC': 'Жирона', 'RC Celta de Vigo': 'Сельта', 'Real Betis Balompié': 'Бетис', 'Sevilla FC': 'Севилья', 'Valencia CF': 'Валенсия', 'Lazio Roma': 'Лацио', 'Atalanta BC': 'Аталанта', 'AS Roma': 'Рома', 'Olympique de Marseille': 'Марсель', 'Lille OSC': 'Лилль', 'OGC Nice': 'Ницца', 'Stade Rennais FC': 'Ренн', 'RC Strasbourg Alsace': 'Страсбур', 'FC Nantes': 'Нант', 'SC Braga': 'Брага', 'RSC Anderlecht': 'Андерлехт', 'KRC Genk': 'Генк', 'Ferencvárosi TC': 'Ференцварош', 'Ludogorets Razgrad': 'Лудогорец', 'Qarabağ FK': 'Карабах', 'Sparta Praha': 'Спарта Прага', 'Slavia Praha': 'Славия Прага', 'SK Slavia Praha': 'Славия Прага', 'FC Basel 1893': 'Базель', 'Grasshopper Club Zürich': 'Грассхоппер', 'Manchester United FC': 'Манчестер Юнайтед', 'Villarreal CF': 'Вильярреал', 'PAE AEK': 'АЕК', 'LASK Linz': 'ЛАСК', 'Viking FK': 'Викинг', 'ŠK Slovan Bratislava': 'Слован Братислава', 'FK Bodø/Glimt': 'Будё-Глимт', 'Como 1907': 'Комо', 'RB Leipzig': 'РБ Лейпциг', 'Sabah FK': 'Сабах' };
 const teamSynonyms = { 'мс':'Манчестер Сити','ман сити':'Манчестер Сити','мю':'Манчестер Юнайтед','реал':'Реал Мадрид','реал мадрид':'Реал Мадрид','барса':'Барселона','барселона':'Барселона','бавария':'Бавария','дортмунд':'Боруссия Дортмунд','атлетико':'Атлетико Мадрид','интер':'Интер','наполи':'Наполи','псж':'ПСЖ','ливерпуль':'Ливерпуль','челси':'Челси','арсенал':'Арсенал','ювентус':'Ювентус','милан':'Милан','аякс':'Аякс','порту':'Порту','бенфика':'Бенфика','лион':'Лион','монако':'Монако','зальцбург':'Зальцбург','шахтер':'Шахтер','селтик':'Селтик','брюгге':'Брюгге','галатасарай':'Галатасарай','фенербахче':'Фенербахче','олимпиакос':'Олимпиакос','аек':'АЕК','копенгаген':'Копенгаген','янг бойз':'Янг Бойз','црвена звезда':'Црвена Звезда','ланс':'Ланс','реал сосьедад':'Реал Сосьедад','псв':'ПСВ','фейеноорд':'Фейеноорд','спортинг':'Спортинг','штутгарт':'Штутгарт','астон вилла':'Астон Вилла','болонья':'Болонья','жирона':'Жирона','сельта':'Сельта','бетис':'Бетис','севилья':'Севилья','валенсия':'Валенсия','лацио':'Лацио','аталанта':'Аталанта','рома':'Рома','марсель':'Марсель','лилль':'Лилль','ницца':'Ницца','ренн':'Ренн','нант':'Нант','брага':'Брага','андерлехт':'Андерлехт','генк':'Генк','ференцварош':'Ференцварош','лудогорец':'Лудогорец','карабах':'Карабах','базель':'Базель','вильярреал':'Вильярреал','ласк':'ЛАСК','викинг':'Викинг','слован братислава':'Слован Братислава','будё-глимт':'Будё-Глимт','комо':'Комо','рб лейпциг':'РБ Лейпциг','сабах':'Сабах' };
 const teamAliases = new Map();
@@ -736,7 +747,6 @@ async function listMyDuels(userId) {
   return result;
 }
 
-// ========== Streak, quests, titles ==========
 async function checkMatchdayStreakBonus(matchdayKey) {
   const m = await getSheetData('Matches', 'A:J');
   const dm = m.filter(r => isDataRow(r, 'match_id') && getMatchdayKey(r[4]) === matchdayKey);
@@ -913,7 +923,6 @@ async function getSeasonTitlesForUser(userId) {
   return { userId: uid, badges, currentTitles: cur };
 }
 
-// ========== Пересчёт по матчу ==========
 async function recalculatePointsForMatch(matchId, hs, as) {
   const H = toScore(hs), A = toScore(as);
   if (H === null || A === null) return { predictionsUpdated: 0, fantikiAwarded: 0 };
