@@ -49,9 +49,6 @@ const EXPECTED_COLUMNS = {
 };
 
 // ========== Telegram: режим webhook / polling ==========
-// USE_WEBHOOK=true  → принудительно webhook
-// USE_WEBHOOK=false → принудительно polling (для локальной разработки)
-// не задано         → на Render автоматически webhook, локально polling
 const _useWebhookEnv = String(process.env.USE_WEBHOOK || '').toLowerCase();
 const RENDER_HOST = process.env.RENDER_EXTERNAL_HOSTNAME || '';
 const USE_WEBHOOK = !!BOT_TOKEN && (_useWebhookEnv === 'true' || (_useWebhookEnv !== 'false' && !!RENDER_HOST));
@@ -118,7 +115,7 @@ async function batchGetSheets(sheetRanges) {
   return result;
 }
 
-// ========== Вспомогательные функции ==========
+// ========== Вспомогательные ==========
 function isNotEmpty(v) { return v !== null && v !== undefined && String(v).trim() !== ''; }
 function toNum(v, f = 0) { const n = Number(v); return Number.isFinite(n) ? n : f; }
 function toScore(v) { if (v === null || v === undefined || String(v).trim() === '') return null; const n = Number(v); return Number.isFinite(n) ? n : null; }
@@ -130,7 +127,7 @@ function rangeForRow(sheet, idx, cols) { return `${quoteSheetName(sheet)}!A${idx
 function isDifferentRow(o, n, len) { for (let i = 0; i < len; i++) { if (String(o?.[i] ?? '').trim() !== String(n?.[i] ?? '').trim()) return true; } return false; }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ========== Уровни (Stage 1) ==========
+// ========== Уровни ==========
 function calculateLevel(totalEarned) {
   const t = toNum(totalEarned, 0);
   if (t >= 5000) return 5; // Профи
@@ -150,7 +147,17 @@ function getLevelThreshold(level) {
   return [0, 100, 500, 1000, 2000, 5000][level] || 0;
 }
 
-// ========== Google Sheets API (запись) ==========
+// ========== Matchday helpers ==========
+function getMatchdayKey(utcDate) {
+  const d = new Date(utcDate);
+  if (!Number.isFinite(d.getTime())) return null;
+  return d.toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+}
+function todayUtcKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+// ========== Google Sheets: запись ==========
 async function appendRows(sheet, rows) {
   if (!rows.length) return;
   const len = EXPECTED_COLUMNS[sheet] || Math.max(...rows.map(r => r.length));
@@ -216,126 +223,20 @@ async function deleteRowsByRowIndices(sheet, indexes) {
   invalidateSheetCache(sheet);
 }
 
-// ========== Миграция: создание/расширение листов ==========
-async function setupSheet(sheetName, expectedHeaders) {
-  let exists = true;
-  try {
-    await sheetsRequestWithRetry(() =>
-      sheets.spreadsheets.values.get({
-        spreadsheetId: SHEET_ID,
-        range: `${quoteSheetName(sheetName)}!A1:A1`,
-      })
-    );
-  } catch (err) {
-    exists = false;
-  }
-
-  if (!exists) {
-    await sheetsRequestWithRetry(() =>
-      sheets.spreadsheets.batchUpdate({
-        spreadsheetId: SHEET_ID,
-        requestBody: {
-          requests: [{ addSheet: { properties: { title: sheetName } } }],
-        },
-      })
-    );
-    delete sheetIdCache[sheetName];
-    await sheetsRequestWithRetry(() =>
-      sheets.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID,
-        range: `${quoteSheetName(sheetName)}!A1:${columnLetter(expectedHeaders.length)}1`,
-        valueInputOption: 'RAW',
-        requestBody: { values: [expectedHeaders] },
-      })
-    );
-    invalidateSheetCache(sheetName);
-    return { created: true, updated: false };
-  }
-
-  const res = await sheetsRequestWithRetry(() =>
-    sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range: `${quoteSheetName(sheetName)}!A1:AZ1`,
-    })
-  );
-  const currentHeaders = res.data.values?.[0] || [];
-  const maxLen = Math.max(currentHeaders.length, expectedHeaders.length);
-  const merged = [];
-  for (let i = 0; i < maxLen; i++) merged.push(currentHeaders[i] ?? expectedHeaders[i] ?? '');
-
-  const changed = merged.length !== currentHeaders.length
-    || merged.some((h, i) => h !== (currentHeaders[i] ?? ''));
-  if (!changed) return { created: false, updated: false };
-
-  await sheetsRequestWithRetry(() =>
-    sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID,
-      range: `${quoteSheetName(sheetName)}!A1:${columnLetter(merged.length)}1`,
-      valueInputOption: 'RAW',
-      requestBody: { values: [merged] },
-    })
-  );
-  invalidateSheetCache(sheetName);
-  return { created: false, updated: true, headers: merged };
-}
-
-async function migrateFantiki() {
-  const result = { sheetsCreated: [], columnsUpdated: [], usersInitialized: 0, predictionsInitialized: 0 };
-
-  const newSheets = [
-    { name: 'FantikiTransactions', headers: ['tx_id', 'user_id', 'amount', 'reason', 'ref_id', 'created_at', 'balance_after'] },
-    { name: 'Duels', headers: ['duel_id', 'match_id', 'creator_id', 'stake', 'status', 'created_at', 'settled_at', 'pot', 'winner_ids'] },
-    { name: 'DuelBets', headers: ['bet_id', 'duel_id', 'user_id', 'predicted_home', 'predicted_away', 'joined_at', 'result'] },
-    { name: 'QuestsProgress', headers: ['user_id', 'quest_id', 'matchday_key', 'completed_at', 'awarded'] },
-    { name: 'MatchdayBonuses', headers: ['bonus_id', 'matchday_key', 'type', 'user_id', 'place', 'amount', 'awarded_at'] },
-  ];
-  for (const s of newSheets) {
-    const r = await setupSheet(s.name, s.headers);
-    if (r.created) result.sheetsCreated.push(s.name);
-  }
-
-  const usersHeaders = ['user_id', 'username', 'display_name', 'registration_date', 'points', 'total_predictions', 'successful', 'exact', 'difference', 'draws', 'outcomes', 'misses', 'fantiki_balance', 'total_earned_season', 'level', 'historical_earned'];
-  const predHeaders = ['prediction_id', 'user_id', 'match_id', 'predicted_home', 'predicted_away', 'created_at', 'updated_at', 'points', 'prediction_type', 'fantiki_awarded', 'is_starred'];
-
-  const uR = await setupSheet('Users', usersHeaders);
-  if (uR.updated) result.columnsUpdated.push('Users');
-  const pR = await setupSheet('Predictions', predHeaders);
-  if (pR.updated) result.columnsUpdated.push('Predictions');
-
-  const usersData = await getSheetData('Users', 'A:P');
-  const userUpdates = [];
-  usersData.forEach((row, idx) => {
-    if (!isDataRow(row, 'user_id')) return;
-    const padded = padRow(row, EXPECTED_COLUMNS.Users);
-    let changed = false;
-    if (padded[12] === '' || padded[12] == null) { padded[12] = 0; changed = true; }
-    if (padded[13] === '' || padded[13] == null) { padded[13] = 0; changed = true; }
-    if (padded[14] === '' || padded[14] == null) { padded[14] = 0; changed = true; }
-    if (padded[15] === '' || padded[15] == null) { padded[15] = 0; changed = true; }
-    if (changed) { userUpdates.push({ rowIndex: idx, values: padded }); result.usersInitialized++; }
-  });
-  if (userUpdates.length) await batchWriteRows('Users', userUpdates);
-
-  const predData = await getSheetData('Predictions', 'A:K');
-  const predUpdates = [];
-  predData.forEach((row, idx) => {
-    if (!isDataRow(row, 'prediction_id')) return;
-    const padded = padRow(row, EXPECTED_COLUMNS.Predictions);
-    let changed = false;
-    if (padded[9] === '' || padded[9] == null) { padded[9] = 0; changed = true; }
-    if (padded[10] === '' || padded[10] == null) { padded[10] = 'FALSE'; changed = true; }
-    if (changed) { predUpdates.push({ rowIndex: idx, values: padded }); result.predictionsInitialized++; }
-  });
-  if (predUpdates.length) await batchWriteRows('Predictions', predUpdates);
-
-  return result;
-}
-
 // ========== Начисление фантиков ==========
-async function awardFantiki(userId, amount, reason, refId = '') {
+async function awardFantiki(userId, amount, reason, refId = '', idempotencyKey = '') {
   const amt = toNum(amount, 0);
   if (!userId || !amt) return { success: false, error: 'Invalid params' };
   const uid = String(userId).trim();
+
+  // Idempotency: если передан ключ вида "reason|ref_id" — проверяем, была ли уже такая транзакция
+  if (idempotencyKey) {
+    const txData = await getSheetData('FantikiTransactions', 'A:G');
+    const exists = txData.some(r => isDataRow(r, 'tx_id')
+      && String(r[1] || '').trim() === uid
+      && `${r[3]}|${r[4]}` === idempotencyKey);
+    if (exists) return { success: false, error: 'Already awarded', idempotent: true };
+  }
 
   const usersData = await getSheetData('Users', 'A:P');
   const userIndex = usersData.findIndex(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
@@ -351,7 +252,6 @@ async function awardFantiki(userId, amount, reason, refId = '') {
   user[12] = newBalance;
   user[13] = newTotalEarned;
   user[14] = newLevel;
-
   await writeRow('Users', userIndex, user);
 
   const txId = `tx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -565,17 +465,42 @@ function addResultToDelta(delta, result, sign) {
   if (result.type === 'miss') delta.misses += sign;
 }
 
+// ========== Фантики за прогноз ==========
+function calculatePredictionFantiki(predType, totalGoals, userLevel) {
+  let base = 0;
+  if (predType === 'outcome') base = 10;
+  else if (predType === 'difference') base = 20;
+  else if (predType === 'exact') {
+    base = 50;
+    if (totalGoals >= 8) base += 50;
+    else if (totalGoals >= 6) base += 25;
+  }
+  if (base === 0) return 0;
+  const mult = 1 + getLevelBonus(userLevel);
+  return Math.round(base * mult);
+}
+
+// ========== Начисление очков и фантиков ==========
 async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
   const ah = toScore(homeScore), aa = toScore(awayScore);
-  if (ah === null || aa === null) return 0;
+  if (ah === null || aa === null) return { predictionsUpdated: 0, fantikiAwarded: 0 };
   const matchIdStr = String(matchId).trim();
-  const { Predictions: predictionsData, Users: usersData } = await batchGetSheets([
+  const totalGoals = ah + aa;
+
+  const { Predictions: predictionsData, Users: usersData, Matches: matchesData } = await batchGetSheets([
     { sheet: 'Predictions', range: 'A:K' },
     { sheet: 'Users', range: 'A:P' },
+    { sheet: 'Matches', range: 'A:J' },
   ]);
+
+  const matchRow = matchesData.find(r => isDataRow(r, 'match_id') && String(r[0]).trim() === matchIdStr);
+  const matchdayKey = matchRow ? getMatchdayKey(matchRow[4]) : null;
+
   const latestMap = getLatestPredictionMap(predictionsData);
   const predictionUpdates = [];
   const userDeltas = new Map();
+  const fantikiDeltas = new Map();
+
   predictionsData.forEach((row, rowIndex) => {
     if (!isDataRow(row, 'prediction_id')) return;
     const pMatchId = String(row[2] || '').trim();
@@ -586,26 +511,56 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
     const latest = latestMap.get(key);
     if (!latest) return;
     const oldPoints = toNum(row[7], 0), oldType = String(row[8] || '').trim();
+    const oldFantiki = toNum(row[9], 0);
     const ensureDelta = () => { if (!userDeltas.has(userId)) userDeltas.set(userId, emptyUserDelta()); return userDeltas.get(userId); };
+    const ensureFantikiDelta = () => { if (!fantikiDeltas.has(userId)) fantikiDeltas.set(userId, 0); return fantikiDeltas; };
+
     if (rowIndex !== latest.idx) {
-      if (oldPoints !== 0 || oldType !== 'duplicate') {
+      if (oldPoints !== 0 || oldType !== 'duplicate' || oldFantiki !== 0) {
         const upd = padRow(row, EXPECTED_COLUMNS.Predictions);
-        upd[7] = 0; upd[8] = 'duplicate';
+        upd[7] = 0; upd[8] = 'duplicate'; upd[9] = 0;
         predictionUpdates.push({ rowIndex, values: upd });
         addResultToDelta(ensureDelta(), { points: oldPoints, type: oldType }, -1);
+        if (oldFantiki !== 0) ensureFantikiDelta().set(userId, fantikiDeltas.get(userId) - oldFantiki);
       }
       return;
     }
+
     const newResult = calculatePoints(row[3], row[4], ah, aa);
-    if (oldPoints === newResult.points && oldType === newResult.type) return;
-    const upd = padRow(row, EXPECTED_COLUMNS.Predictions);
-    upd[6] = new Date().toISOString(); upd[7] = newResult.points; upd[8] = newResult.type;
-    predictionUpdates.push({ rowIndex, values: upd });
-    const delta = ensureDelta();
-    addResultToDelta(delta, { points: oldPoints, type: oldType }, -1);
-    addResultToDelta(delta, newResult, 1);
+
+    const userRow = usersData.find(r => isDataRow(r, 'user_id') && String(r[0]).trim() === userId);
+    const userPad = userRow ? padRow(userRow, EXPECTED_COLUMNS.Users) : null;
+    const userLevel = userPad ? toNum(userPad[14], 0) : 0;
+
+    const newFantiki = calculatePredictionFantiki(newResult.type, totalGoals, userLevel);
+
+    const pointsChanged = oldPoints !== newResult.points || oldType !== newResult.type;
+    const fantikiChanged = oldFantiki !== newFantiki;
+
+    if (pointsChanged || fantikiChanged) {
+      const upd = padRow(row, EXPECTED_COLUMNS.Predictions);
+      if (pointsChanged) {
+        upd[6] = new Date().toISOString();
+        upd[7] = newResult.points;
+        upd[8] = newResult.type;
+      }
+      if (fantikiChanged) upd[9] = newFantiki;
+      predictionUpdates.push({ rowIndex, values: upd });
+    }
+
+    if (pointsChanged) {
+      const delta = ensureDelta();
+      addResultToDelta(delta, { points: oldPoints, type: oldType }, -1);
+      addResultToDelta(delta, newResult, 1);
+    }
+    if (fantikiChanged) {
+      const fDelta = ensureFantikiDelta();
+      fDelta.set(userId, (fDelta.get(userId) || 0) + (newFantiki - oldFantiki));
+    }
   });
+
   await batchWriteRows('Predictions', predictionUpdates);
+
   if (userDeltas.size > 0) {
     const userUpdates = [];
     for (const [userId, delta] of userDeltas.entries()) {
@@ -623,9 +578,147 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
     }
     await batchWriteRows('Users', userUpdates);
   }
-  return predictionUpdates.length;
+
+  let totalAwarded = 0;
+  for (const [userId, amount] of fantikiDeltas.entries()) {
+    if (amount === 0) continue;
+    const reason = amount > 0 ? 'prediction_award' : 'prediction_correction';
+    await awardFantiki(userId, amount, reason, matchIdStr, '');
+    totalAwarded += amount;
+  }
+
+  if (matchdayKey) {
+    await checkMatchdayStreakBonus(matchdayKey).catch(console.error);
+  }
+
+  return { predictionsUpdated: predictionUpdates.length, fantikiAwarded: totalAwarded };
 }
 
+// ========== Серия ТС за день ==========
+async function checkMatchdayStreakBonus(matchdayKey) {
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const dayMatches = matchesData.filter(r => isDataRow(r, 'match_id') && getMatchdayKey(r[4]) === matchdayKey);
+  if (dayMatches.length === 0) return;
+
+  // Все матчи дня должны быть finished/postponed/cancelled
+  const allDone = dayMatches.every(r => {
+    const status = String(r[5] || '').trim();
+    return status === 'finished' || status === 'postponed' || status === 'cancelled';
+  });
+  if (!allDone) return;
+
+  // Проверка: уже начислено?
+  const bonusesData = await getSheetData('MatchdayBonuses', 'A:G');
+  const alreadyDone = bonusesData.some(r => isDataRow(r, 'bonus_id')
+    && String(r[1] || '').trim() === matchdayKey
+    && String(r[2] || '').trim() === 'streak');
+  if (alreadyDone) return;
+
+  // Считаем ТС по пользователям
+  const { Predictions: predictionsData } = await batchGetSheets([
+    { sheet: 'Predictions', range: 'A:K' },
+  ]);
+  const dayMatchIds = new Set(dayMatches.map(r => String(r[0]).trim()));
+  const latestMap = getLatestPredictionMap(predictionsData);
+  const exactCountByUser = new Map();
+  for (const item of latestMap.values()) {
+    const row = predictionsData[item.idx];
+    if (!row) continue;
+    const matchId = String(row[2] || '').trim();
+    if (!dayMatchIds.has(matchId)) continue;
+    if (String(row[8] || '').trim() !== 'exact') continue;
+    const uid = String(row[1] || '').trim();
+    if (!uid) continue;
+    exactCountByUser.set(uid, (exactCountByUser.get(uid) || 0) + 1);
+  }
+
+  let totalBonus = 0;
+  let awardedCount = 0;
+  for (const [userId, count] of exactCountByUser.entries()) {
+    let bonus = 0;
+    if (count >= 5) bonus = 300;
+    else if (count === 4) bonus = 150;
+    else if (count === 3) bonus = 75;
+    else if (count === 2) bonus = 25;
+    if (bonus > 0) {
+      const r = await awardFantiki(userId, bonus, 'daily_streak_bonus', matchdayKey, `daily_streak|${matchdayKey}|${userId}`);
+      if (r.success) { totalBonus += bonus; awardedCount++; }
+    }
+  }
+
+  // Маркер, что день обработан
+  const bonusId = `bonus_streak_${matchdayKey}`;
+  await appendRows('MatchdayBonuses', [[
+    bonusId, matchdayKey, 'streak', '', '', totalBonus, new Date().toISOString(),
+  ]]);
+
+  return { matchdayKey, awardedCount, totalBonus };
+}
+
+// ========== Проверка всех недавних matchday ==========
+async function checkRecentMatchdays() {
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const daySet = new Set();
+  const now = Date.now();
+  matchesData.forEach(r => {
+    if (!isDataRow(r, 'match_id')) return;
+    const d = new Date(r[4] || '');
+    if (!Number.isFinite(d.getTime())) return;
+    const diff = now - d.getTime();
+    if (diff > 0 && diff < 7 * 24 * 60 * 60 * 1000) {
+      const k = getMatchdayKey(r[4]);
+      if (k) daySet.add(k);
+    }
+  });
+  const results = [];
+  for (const key of daySet) {
+    try { results.push(await checkMatchdayStreakBonus(key)); }
+    catch (e) { console.error(`Streak check failed for ${key}:`, e.message); }
+  }
+  return results;
+}
+
+// ========== Квесты ==========
+async function checkQuestsProgress(userId, matchdayKey) {
+  if (!matchdayKey || !userId) return;
+  const { Matches: matchesData, Predictions: predictionsData, QuestsProgress: questsData } = await batchGetSheets([
+    { sheet: 'Matches', range: 'A:J' },
+    { sheet: 'Predictions', range: 'A:K' },
+    { sheet: 'QuestsProgress', range: 'A:E' },
+  ]);
+
+  const dayMatches = matchesData.filter(r => isDataRow(r, 'match_id') && getMatchdayKey(r[4]) === matchdayKey && String(r[5] || '').trim() === 'scheduled');
+  const dayMatchIds = new Set(dayMatches.map(r => String(r[0]).trim()));
+  if (dayMatchIds.size === 0) return;
+
+  const latestMap = getLatestPredictionMap(predictionsData);
+  const userPreds = [...latestMap.values()]
+    .map(item => predictionsData[item.idx])
+    .filter(r => r && String(r[1] || '').trim() === userId && dayMatchIds.has(String(r[2] || '').trim()));
+
+  const hasQuest = (qid) => questsData.some(r => isDataRow(r, 'user_id')
+    && String(r[0] || '').trim() === userId
+    && String(r[1] || '').trim() === qid
+    && String(r[2] || '').trim() === matchdayKey);
+
+  const tryAward = async (questId, amount) => {
+    if (hasQuest(questId)) return;
+    await awardFantiki(userId, amount, `quest_${questId}`, matchdayKey, `quest|${questId}|${matchdayKey}|${userId}`);
+    await appendRows('QuestsProgress', [[userId, questId, matchdayKey, new Date().toISOString(), amount]]);
+  };
+
+  if (userPreds.length >= 5) await tryAward('predict_5', 30);
+  if (dayMatches.length > 0 && userPreds.length >= dayMatches.length) await tryAward('predict_all', 50);
+  if (userPreds.some(r => String(r[8] || '').trim() === 'exact')) await tryAward('first_exact', 20);
+
+  const outcomesCount = userPreds.filter(r => {
+    const t = String(r[8] || '').trim();
+    return t === 'outcome' || t === 'difference' || t === 'exact' || t === 'draw';
+  }).length;
+  if (outcomesCount >= 3) await tryAward('three_outcomes', 15);
+}
+
+// ========== Football-Data sync ==========
 async function fetchUCLMatches() {
   const data = await fetchFootball(`/competitions/CL/matches?season=${SEASON}`);
   const apiMatches = data.matches || [];
@@ -837,7 +930,7 @@ async function getUserPredictionsResponse(userId, query = {}) {
     const matchId = String(prediction[2]).trim();
     const match = matches.find(m => String(m[0]).trim() === matchId);
     if (!match) return null;
-    return { match_id: matchId, stage: match[1] || '', home_team: match[2] || '', away_team: match[3] || '', kickoff_utc: match[4] || '', status: match[5] || '', home_score: toScore(match[6]), away_score: toScore(match[7]), predicted_home: toScore(prediction[3]), predicted_away: toScore(prediction[4]), points: toNum(prediction[7], 0), prediction_type: prediction[8] || '' };
+    return { match_id: matchId, stage: match[1] || '', home_team: match[2] || '', away_team: match[3] || '', kickoff_utc: match[4] || '', status: match[5] || '', home_score: toScore(match[6]), away_score: toScore(match[7]), predicted_home: toScore(prediction[3]), predicted_away: toScore(prediction[4]), points: toNum(prediction[7], 0), prediction_type: prediction[8] || '', fantiki_awarded: toNum(prediction[9], 0) };
   }).filter(Boolean);
   result = filterPredictionResponseByType(result, query.type);
   const statusFilter = String(query.status || '').toLowerCase().trim();
@@ -845,7 +938,7 @@ async function getUserPredictionsResponse(userId, query = {}) {
   return sortPredictionsResponse(result, query.sort);
 }
 
-// ========== Telegram API helpers ==========
+// ========== Telegram ==========
 let telegramOffset = 0;
 let conflictCounter = 0;
 async function callTelegram(method, params) {
@@ -881,6 +974,7 @@ async function processTelegramMessage(msg) {
   const matches = matchesData.filter(row => isDataRow(row, 'match_id'));
   let predictionsData = await getSheetData('Predictions', 'A:K');
   let savedCount = 0;
+  const affectedMatchdays = new Set();
   for (const line of lines) {
     const parsed = parsePredictionText(line);
     if (!parsed) continue;
@@ -895,8 +989,16 @@ async function processTelegramMessage(msg) {
     predictionsData = predictionsData.filter((_, i) => !existingIndexes.includes(i));
     await appendRows('Predictions', [[`${userId}_${matchId}`, userId, matchId, parsed.homeScore, parsed.awayScore, new Date().toISOString(), new Date().toISOString(), 0, '', 0, 'FALSE']]);
     savedCount++;
+    const k = getMatchdayKey(match[4]);
+    if (k) affectedMatchdays.add(k);
   }
-  if (savedCount > 0) await callTelegram('sendMessage', { chat_id: chatId, text: `✅ Сохранено прогнозов: ${savedCount}` });
+  if (savedCount > 0) {
+    for (const k of affectedMatchdays) {
+      try { await checkQuestsProgress(userId, k); }
+      catch (e) { console.error('Quest check failed:', e.message); }
+    }
+    await callTelegram('sendMessage', { chat_id: chatId, text: `✅ Сохранено прогнозов: ${savedCount}` });
+  }
 }
 
 async function startBotPolling() {
@@ -938,7 +1040,6 @@ async function startBotPolling() {
   }
 }
 
-// ========== Webhook endpoint ==========
 app.post(WEBHOOK_PATH, (req, res) => {
   if (req.headers['x-telegram-bot-api-secret-token'] !== WEBHOOK_SECRET) {
     return res.status(403).json({ error: 'Forbidden' });
@@ -952,9 +1053,9 @@ app.post(WEBHOOK_PATH, (req, res) => {
   }
 });
 
-// ========== API-маршруты ==========
+// ========== API ==========
 
-// ---- Фантики (Stage 1) ----
+// ---- Fantiki ----
 app.get('/api/fantiki/balance/:userId', asyncHandler(async (req, res) => {
   const userId = String(req.params.userId || '').trim();
   if (!userId) return res.status(400).json({ error: 'userId required' });
@@ -973,15 +1074,32 @@ app.get('/api/fantiki/transactions/:userId', asyncHandler(async (req, res) => {
     .slice(-limit)
     .reverse();
   res.json(userTx.map(r => ({
-    id: r[0] || '',
-    amount: toNum(r[2], 0),
-    reason: r[3] || '',
-    refId: r[4] || '',
-    createdAt: r[5] || '',
-    balanceAfter: toNum(r[6], 0),
+    id: r[0] || '', amount: toNum(r[2], 0), reason: r[3] || '', refId: r[4] || '', createdAt: r[5] || '', balanceAfter: toNum(r[6], 0),
   })));
 }));
 
+app.post('/api/daily-login', asyncHandler(async (req, res) => {
+  const user = extractAuthenticatedUser(req);
+  if (!user?.id) return res.status(401).json({ error: 'Unauthorized' });
+  const userId = String(user.id).trim();
+
+  const todayKey = todayUtcKey();
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const todayHasMatches = matchesData.some(r => isDataRow(r, 'match_id') && getMatchdayKey(r[4]) === todayKey);
+  if (!todayHasMatches) return res.json({ success: false, reason: 'no_matches_today', date: todayKey });
+
+  const txData = await getSheetData('FantikiTransactions', 'A:G');
+  const alreadyClaimed = txData.some(r => isDataRow(r, 'tx_id')
+    && String(r[1] || '').trim() === userId
+    && String(r[3] || '').trim() === 'daily_login'
+    && String(r[4] || '').trim() === todayKey);
+  if (alreadyClaimed) return res.json({ success: false, reason: 'already_claimed_today', date: todayKey });
+
+  const result = await awardFantiki(userId, 10, 'daily_login', todayKey, `daily_login|${userId}|${todayKey}`);
+  res.json({ success: true, date: todayKey, amount: 10, ...result });
+}));
+
+// ---- Admin ----
 app.post('/api/admin/migrate-fantiki', requireAdmin, asyncHandler(async (req, res) => {
   try { res.json({ success: true, ...(await migrateFantiki()) }); }
   catch (e) { res.status(500).json({ success: false, error: e.message }); }
@@ -994,7 +1112,19 @@ app.post('/api/admin/grant-fantiki', requireAdmin, asyncHandler(async (req, res)
   res.json(result);
 }));
 
-// ---- Standings ----
+app.post('/api/admin/finalize-matchday/:date', requireAdmin, asyncHandler(async (req, res) => {
+  const key = String(req.params.date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  const result = await checkMatchdayStreakBonus(key);
+  res.json({ success: true, matchday: key, result });
+}));
+
+app.post('/api/admin/finalize-recent', requireAdmin, asyncHandler(async (req, res) => {
+  const results = await checkRecentMatchdays();
+  res.json({ success: true, results });
+}));
+
+// ---- Existing endpoints ----
 app.get('/api/standings-history', asyncHandler(async (req, res) => {
   const { Matches: matchesData, Predictions: predictionsData } = await batchGetSheets([
     { sheet: 'Matches', range: 'A:J' },
@@ -1165,6 +1295,8 @@ app.post('/api/predictions', asyncHandler(async (req, res) => {
   predictionsData.forEach((row, rowIndex) => { if (isDataRow(row, 'prediction_id') && String(row[1]).trim() === String(userId).trim() && String(row[2]).trim() === String(matchId).trim()) existingIndexes.push(rowIndex); });
   await deleteRowsByRowIndices('Predictions', existingIndexes);
   await appendRows('Predictions', [[`${userId}_${matchId}`, userId, matchId, pHome, pAway, new Date().toISOString(), new Date().toISOString(), 0, '', 0, 'FALSE']]);
+  const matchdayKey = getMatchdayKey(match[4]);
+  if (matchdayKey) await checkQuestsProgress(userId, matchdayKey).catch(console.error);
   res.json({ success: true });
 }));
 
@@ -1193,7 +1325,7 @@ app.get('/api/match-predictions/:matchId', asyncHandler(async (req, res) => {
   const matchPredictions = [...latestMap.values()].map(item => predictionsData[item.idx]).filter(row => row && String(row[2] || '').trim() === matchId);
   const userMap = new Map();
   usersData.forEach(row => { if (isDataRow(row, 'user_id')) userMap.set(String(row[0]).trim(), row[2] || row[1] || String(row[0]).trim()); });
-  res.json(matchPredictions.map(prediction => ({ userId: String(prediction[1] || '').trim(), displayName: userMap.get(String(prediction[1] || '').trim()) || prediction[1], predictedHome: toScore(prediction[3]), predictedAway: toScore(prediction[4]), points: toNum(prediction[7], 0), predictionType: prediction[8] || '' })));
+  res.json(matchPredictions.map(prediction => ({ userId: String(prediction[1] || '').trim(), displayName: userMap.get(String(prediction[1] || '').trim()) || prediction[1], predictedHome: toScore(prediction[3]), predictedAway: toScore(prediction[4]), points: toNum(prediction[7], 0), predictionType: prediction[8] || '', fantikiAwarded: toNum(prediction[9], 0) })));
 }));
 
 app.get('/api/match-events/:matchId', asyncHandler(async (req, res) => {
@@ -1272,7 +1404,13 @@ app.get('/api/standings', asyncHandler(async (req, res) => {
 }));
 
 app.post('/api/admin/sync-matches', requireAdmin, asyncHandler(async (req, res) => { try { res.json({ success: true, ...(await fetchUCLMatches()) }); } catch (e) { res.status(500).json({ success: false, error: e.message }); } }));
-app.post('/api/admin/update-results', requireAdmin, asyncHandler(async (req, res) => { try { res.json({ success: true, updated: await updateFinishedMatches() }); } catch (e) { res.status(500).json({ success: false, error: e.message }); } }));
+app.post('/api/admin/update-results', requireAdmin, asyncHandler(async (req, res) => {
+  try {
+    const updated = await updateFinishedMatches();
+    const recent = await checkRecentMatchdays();
+    res.json({ success: true, updated, matchdaysChecked: recent.length });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+}));
 app.post('/api/admin/update-events', requireAdmin, asyncHandler(async (req, res) => { try { res.json({ success: true, processed: await updateMatchEventsForFinished() }); } catch (e) { res.status(500).json({ success: false, error: e.message }); } }));
 app.post('/api/admin/recalculate-all', requireAdmin, asyncHandler(async (req, res) => { try { res.json({ success: true, processed: await recalculateAll() }); } catch (e) { res.status(500).json({ success: false, error: e.message }); } }));
 
@@ -1282,8 +1420,12 @@ let syncInProgress = false;
 async function scheduledSync() {
   if (syncInProgress) return;
   syncInProgress = true;
-  try { await fetchUCLMatches(); await updateFinishedMatches(); await updateMatchEventsForFinished(); }
-  catch (e) { console.error(e); }
+  try {
+    await fetchUCLMatches();
+    await updateFinishedMatches();
+    await updateMatchEventsForFinished();
+    await checkRecentMatchdays();
+  } catch (e) { console.error(e); }
   finally { syncInProgress = false; }
 }
 if (AUTO_SYNC && FOOTBALL_DATA_API_KEY) {
@@ -1291,12 +1433,11 @@ if (AUTO_SYNC && FOOTBALL_DATA_API_KEY) {
   setInterval(() => scheduledSync().catch(console.error), SYNC_INTERVAL_MS);
 }
 
-// ========== Запуск сервера ==========
+// ========== Запуск ==========
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
   if (!BOT_TOKEN) return;
-
   if (USE_WEBHOOK) {
     if (!RENDER_HOST) {
       console.warn('⚠️ USE_WEBHOOK=true, но RENDER_EXTERNAL_HOSTNAME не задан. Переключаюсь на polling.');
@@ -1308,10 +1449,7 @@ const server = app.listen(PORT, async () => {
     console.log(`URL: ${webhookUrl}`);
     try {
       await callTelegram('setWebhook', {
-        url: webhookUrl,
-        allowed_updates: ['message'],
-        drop_pending_updates: true,
-        secret_token: WEBHOOK_SECRET,
+        url: webhookUrl, allowed_updates: ['message'], drop_pending_updates: true, secret_token: WEBHOOK_SECRET,
       });
       const info = await callTelegram('getWebhookInfo', {});
       console.log(`✅ Webhook установлен. Pending updates: ${info.result?.pending_update_count || 0}`);
