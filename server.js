@@ -38,9 +38,19 @@ let oddsCache = { fetchedAt: 0, events: [] };
 
 const EXPECTED_COLUMNS = { Users: 12, Predictions: 9, Matches: 10, MatchEvents: 7 };
 
+// ========== Telegram: режим webhook / polling ==========
+// USE_WEBHOOK=true  → принудительно webhook
+// USE_WEBHOOK=false → принудительно polling (для локальной разработки)
+// не задано         → на Render автоматически webhook, локально polling
+const _useWebhookEnv = String(process.env.USE_WEBHOOK || '').toLowerCase();
+const RENDER_HOST = process.env.RENDER_EXTERNAL_HOSTNAME || '';
+const USE_WEBHOOK = !!BOT_TOKEN && (_useWebhookEnv === 'true' || (_useWebhookEnv !== 'false' && !!RENDER_HOST));
+const WEBHOOK_SECRET = crypto.createHash('sha256').update(`secret:${BOT_TOKEN || 'none'}`).digest('hex').slice(0, 32);
+const WEBHOOK_PATH = `/webhook/${crypto.createHash('sha256').update(`path:${BOT_TOKEN || 'none'}`).digest('hex').slice(0, 32)}`;
+
 // ========== Кэш Google Sheets + retry на 429 ==========
 const sheetCache = new Map(); // cacheKey -> { data, expiresAt }
-const SHEET_CACHE_TTL_MS = 45 * 1000; // 45 секунд
+const SHEET_CACHE_TTL_MS = 45 * 1000;
 
 async function sheetsRequestWithRetry(fn, maxRetries = 5) {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -81,7 +91,6 @@ async function getSheetData(sheet, range) {
   return data;
 }
 
-// Один запрос batchGet вместо нескольких последовательных get.
 async function batchGetSheets(sheetRanges) {
   const ranges = sheetRanges.map(({ sheet, range }) => `${quoteSheetName(sheet)}!${range}`);
   const res = await sheetsRequestWithRetry(() =>
@@ -95,7 +104,6 @@ async function batchGetSheets(sheetRanges) {
     sheetCache.set(key, { data, expiresAt: Date.now() + SHEET_CACHE_TTL_MS });
     result[sheet] = data;
   });
-  // Если какой-то лист не вернулся — отдаём пустой массив.
   sheetRanges.forEach(({ sheet }) => { if (!(sheet in result)) result[sheet] = []; });
   return result;
 }
@@ -362,7 +370,6 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
   const ah = toScore(homeScore), aa = toScore(awayScore);
   if (ah === null || aa === null) return 0;
   const matchIdStr = String(matchId).trim();
-  // batchGet — один запрос к API вместо двух
   const { Predictions: predictionsData, Users: usersData } = await batchGetSheets([
     { sheet: 'Predictions', range: 'A:Z' },
     { sheet: 'Users', range: 'A:Z' },
@@ -639,7 +646,7 @@ async function getUserPredictionsResponse(userId, query = {}) {
   return sortPredictionsResponse(result, query.sort);
 }
 
-// ========== Telegram Polling ==========
+// ========== Telegram API helpers ==========
 let telegramOffset = 0;
 let conflictCounter = 0;
 async function callTelegram(method, params) {
@@ -648,6 +655,7 @@ async function callTelegram(method, params) {
   if (!response.ok) { const text = await response.text(); throw new Error(`Telegram API error: ${response.status} ${text}`); }
   return response.json();
 }
+
 function parsePredictionText(text) {
   const clean = String(text || '').replace(/^\/predict(?:@\w+)?\s+/i, '').trim();
   const match = clean.match(/^(.+?)\s+[-–—]\s+(.+?)\s+(\d{1,2})\s*:\s*(\d{1,2})$/i);
@@ -656,6 +664,7 @@ function parsePredictionText(text) {
   if (!home || !away) return null;
   return { home, away, homeScore: Number(match[3]), awayScore: Number(match[4]) };
 }
+
 async function processTelegramMessage(msg) {
   const chatId = msg.chat?.id, from = msg.from, text = msg.text || '';
   if (!text || !from) return;
@@ -690,6 +699,7 @@ async function processTelegramMessage(msg) {
   }
   if (savedCount > 0) await callTelegram('sendMessage', { chat_id: chatId, text: `✅ Сохранено прогнозов: ${savedCount}` });
 }
+
 async function startBotPolling() {
   if (!BOT_TOKEN) return;
   console.log('Запуск Telegram polling...');
@@ -728,6 +738,20 @@ async function startBotPolling() {
     await sleep(1000);
   }
 }
+
+// ========== Webhook endpoint ==========
+app.post(WEBHOOK_PATH, (req, res) => {
+  if (req.headers['x-telegram-bot-api-secret-token'] !== WEBHOOK_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  res.status(200).json({ ok: true });
+  const update = req.body;
+  if (update?.message) {
+    processTelegramMessage(update.message).catch(e =>
+      console.error('Ошибка обработки webhook-сообщения:', e.message)
+    );
+  }
+});
 
 // ========== API-маршруты ==========
 
@@ -1027,9 +1051,38 @@ if (AUTO_SYNC && FOOTBALL_DATA_API_KEY) {
   setInterval(() => scheduledSync().catch(console.error), SYNC_INTERVAL_MS);
 }
 
+// ========== Запуск сервера ==========
 const PORT = process.env.PORT || 3000;
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
-  if (BOT_TOKEN) startBotPolling().catch(console.error);
+  if (!BOT_TOKEN) return;
+
+  if (USE_WEBHOOK) {
+    if (!RENDER_HOST) {
+      console.warn('⚠️ USE_WEBHOOK=true, но RENDER_EXTERNAL_HOSTNAME не задан. Переключаюсь на polling.');
+      startBotPolling().catch(console.error);
+      return;
+    }
+    const webhookUrl = `https://${RENDER_HOST}${WEBHOOK_PATH}`;
+    console.log(`Режим Telegram: WEBHOOK`);
+    console.log(`URL: ${webhookUrl}`);
+    try {
+      await callTelegram('setWebhook', {
+        url: webhookUrl,
+        allowed_updates: ['message'],
+        drop_pending_updates: true,
+        secret_token: WEBHOOK_SECRET,
+      });
+      const info = await callTelegram('getWebhookInfo', {});
+      console.log(`✅ Webhook установлен. Pending updates: ${info.result?.pending_update_count || 0}`);
+    } catch (e) {
+      console.error('❌ Не удалось установить webhook:', e.message);
+      console.warn('Переключаюсь на polling как резерв...');
+      startBotPolling().catch(console.error);
+    }
+  } else {
+    console.log(`Режим Telegram: POLLING${RENDER_HOST ? ' (принудительно через USE_WEBHOOK=false)' : ' (локальная разработка)'}`);
+    startBotPolling().catch(console.error);
+  }
 });
 server.on('error', err => console.error('Server error:', err));
