@@ -8,12 +8,18 @@
   <style>
     :root { --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --muted: #94a3b8; --primary: #3b82f6; --success: #10b981; --danger: #ef4444; --border: #334155; }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-    body { background: var(--bg); color: var(--text); padding-bottom: 80px; }
-    .nav-bar { position: fixed; bottom: 0; left: 0; right: 0; background: var(--card); display: flex; justify-content: space-around; padding: 12px 0; border-top: 1px solid var(--border); z-index: 100; }
-    .nav-item { background: none; border: none; color: var(--muted); font-size: 14px; font-weight: 500; cursor: pointer; padding: 8px 12px; border-radius: 8px; transition: all 0.2s; }
-    .nav-item.active, .nav-item:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+    body { background: var(--bg); color: var(--text); padding-bottom: 90px; }
+    .header { position: sticky; top: 0; background: rgba(15,23,42,0.95); backdrop-filter: blur(8px); padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); z-index: 90; }
+    .header-title { font-size: 16px; font-weight: 700; letter-spacing: 0.3px; }
+    .header-balance { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 700; padding: 6px 12px; background: rgba(59,130,246,0.15); border-radius: 20px; border: 1px solid rgba(59,130,246,0.3); }
+    .coin { font-size: 14px; }
+    .level-badge { font-size: 10px; color: var(--muted); padding-left: 6px; border-left: 1px solid var(--border); font-weight: 500; text-transform: uppercase; letter-spacing: 0.3px; }
+    .nav-bar { position: fixed; bottom: 0; left: 0; right: 0; background: var(--card); display: flex; justify-content: space-around; align-items: center; padding: 8px 0 env(safe-area-inset-bottom); border-top: 1px solid var(--border); z-index: 100; }
+    .nav-item { background: none; border: none; color: var(--muted); padding: 8px 20px; border-radius: 10px; cursor: pointer; transition: color 0.2s, background 0.2s; display: flex; align-items: center; justify-content: center; }
+    .nav-item.active { color: var(--primary); background: rgba(59,130,246,0.12); }
+    .nav-item svg { width: 26px; height: 26px; display: block; }
     #app { padding: 16px; max-width: 600px; margin: 0 auto; }
-    .section-header { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+    .section-header { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; justify-content: space-between; }
     .section-header h2 { font-size: 20px; }
     .badge { background: var(--primary); color: white; font-size: 12px; padding: 2px 8px; border-radius: 12px; }
     .loading, .empty-state { text-align: center; padding: 40px 20px; color: var(--muted); }
@@ -29,9 +35,10 @@
     .status-live { color: var(--success); }
     .status-finished { color: var(--muted); }
     .score-line, .prediction-line, .result-line { font-size: 14px; margin-top: 6px; }
-    .match-actions { display: flex; gap: 8px; margin-top: 10px; }
+    .match-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
     button { cursor: pointer; border: none; border-radius: 8px; font-weight: 500; transition: opacity 0.2s; }
     button:hover { opacity: 0.85; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
     .primary-button { background: var(--primary); color: white; padding: 10px 16px; }
     .secondary-button { background: rgba(255,255,255,0.1); color: var(--text); padding: 10px 16px; }
     .full-width { width: 100%; margin-top: 12px; }
@@ -47,12 +54,12 @@
     .table-sort { background: none; color: inherit; padding: 4px 6px; font-size: 13px; font-weight: 600; }
     .link-button, .metric-button { background: none; border: none; color: var(--text); text-decoration: underline; cursor: pointer; padding: 2px 4px; }
     .metric-button { text-decoration: none; font-weight: 600; color: var(--primary); }
-    .metric-button:hover { color: var(--success); }
-    .metric-button.metric-points { color: #ffffff !important; font-size: 15px; font-weight: 700; text-decoration: none; }
-    .round-points { color: #ffffff !important; font-size: 15px; font-weight: 700; }
+    .metric-button.metric-points { color: #fff !important; font-size: 15px; font-weight: 700; text-decoration: none; }
+    .round-points { color: #fff !important; font-size: 15px; font-weight: 700; }
     .position-arrow { display: inline-block; margin-left: 4px; font-weight: bold; font-size: 11px; vertical-align: middle; }
     .position-arrow.up { color: var(--success); }
     .position-arrow.down { color: var(--danger); }
+    .table-level { font-size: 10px; color: var(--muted); display: block; margin-top: 2px; }
     .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 16px; }
     .modal-card { background: var(--card); border-radius: 16px; width: 100%; max-width: 500px; max-height: 85vh; display: flex; flex-direction: column; overflow: hidden; }
     .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 16px; border-bottom: 1px solid var(--border); }
@@ -60,7 +67,7 @@
     .icon-button { background: none; color: var(--muted); font-size: 20px; line-height: 1; }
     .modal-body { padding: 16px; overflow-y: auto; flex: 1; }
     .modal-bottom-close { margin: 0 16px 16px; }
-    .score-inputs { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 20px 0; }
+    .score-inputs { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 12px 0; }
     .score-inputs label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
     .score-inputs input { width: 70px; padding: 10px; text-align: center; font-size: 18px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); }
     .score-separator { font-size: 24px; color: var(--muted); }
@@ -71,17 +78,87 @@
     .chart-container { position: relative; height: 280px; width: 100%; }
     .standings-hint { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
     .odds-line { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; margin-bottom: 2px; }
-    .odds-item { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 8px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.08); font-size: 12px; color: #ffffff; }
-    .odds-item strong { color: #10b981; font-size: 13px; }
+    .odds-item { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 8px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.08); font-size: 12px; color: #fff; }
+    .odds-item strong { color: var(--success); font-size: 13px; }
+
+    /* Формы */
+    .form-label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 6px; text-transform: uppercase; letter-spacing: 0.3px; font-weight: 600; }
+    .form-input { width: 100%; padding: 10px 12px; font-size: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); }
+    .form-input:focus { outline: none; border-color: var(--primary); }
+    select.form-input { appearance: none; }
+
+    /* Дуэли */
+    .duel-tabs { display: flex; gap: 4px; background: rgba(255,255,255,0.05); padding: 4px; border-radius: 10px; margin-bottom: 16px; }
+    .duel-tab { flex: 1; background: none; border: none; color: var(--muted); padding: 8px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; }
+    .duel-tab.active { background: var(--primary); color: white; }
+    .duel-card { background: var(--card); border-radius: 12px; padding: 14px; margin-bottom: 12px; border: 1px solid var(--border); }
+    .duel-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 6px; }
+    .duel-teams { font-weight: 600; font-size: 15px; }
+    .duel-stake { background: rgba(59,130,246,0.15); color: var(--primary); padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 700; white-space: nowrap; }
+    .duel-meta { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    .duel-participants { font-size: 12px; color: var(--muted); margin-bottom: 6px; line-height: 1.4; }
+    .duel-actions { display: flex; gap: 8px; margin-top: 10px; }
+    .duel-actions button { flex: 1; }
+    .duel-my-bet { font-size: 13px; margin: 8px 0; padding: 8px 10px; background: rgba(255,255,255,0.04); border-radius: 8px; border-left: 3px solid var(--primary); }
+    .duel-result-winner { color: var(--success); font-weight: 700; }
+    .duel-result-loser { color: var(--danger); }
+    .duel-result-refunded { color: var(--muted); }
+
+    /* Тосты */
+    .toast-container { position: fixed; top: 70px; left: 50%; transform: translateX(-50%); z-index: 2000; display: flex; flex-direction: column; gap: 8px; pointer-events: none; max-width: 90vw; }
+    .toast { background: var(--card); border: 1px solid var(--border); padding: 10px 16px; border-radius: 10px; font-size: 13px; color: var(--text); box-shadow: 0 4px 20px rgba(0,0,0,0.4); animation: toast-in 0.2s ease; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .toast.success { border-color: var(--success); color: var(--success); }
+    .toast.error { border-color: var(--danger); color: var(--danger); }
+    @keyframes toast-in { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
   </style>
 </head>
 <body>
+  <header class="header">
+    <div class="header-title">UCL Predictor</div>
+    <div class="header-balance" id="header-balance">
+      <span class="coin">🪙</span>
+      <span id="balance-value">—</span>
+      <span class="level-badge" id="level-badge" style="display:none"></span>
+    </div>
+  </header>
   <div id="app"></div>
   <nav class="nav-bar">
-    <button id="nav-matches" class="nav-item active">Матчи</button>
-    <button id="nav-my-predictions" class="nav-item">Мои прогнозы</button>
-    <button id="nav-standings" class="nav-item">Таблица</button>
+    <button id="nav-matches" class="nav-item active" aria-label="Матчи">
+      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="2" y="5" width="20" height="14" rx="2.5" stroke="currentColor" stroke-width="1.8"/>
+        <line x1="12" y1="5" x2="12" y2="19" stroke="currentColor" stroke-width="1.8"/>
+        <circle cx="12" cy="12" r="2.8" stroke="currentColor" stroke-width="1.8"/>
+        <path d="M2 9.5h3v5H2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M22 9.5h-3v5h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+    <button id="nav-my-predictions" class="nav-item" aria-label="Мои прогнозы">
+      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="12" cy="12" r="9.5" stroke="currentColor" stroke-width="1.8"/>
+        <path d="M12 6.5l3.2 2.3-1.2 3.8h-4l-1.2-3.8L12 6.5z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+        <path d="M6.8 10.2l-2.6-.8M17.2 10.2l2.6-.8M9.2 16.8l-1.6 2.4M14.8 16.8l1.6 2.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      </svg>
+    </button>
+    <button id="nav-standings" class="nav-item" aria-label="Таблица">
+      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="2" y="14" width="5" height="7" rx="1" stroke="currentColor" stroke-width="1.8"/>
+        <rect x="9.5" y="9" width="5" height="12" rx="1" stroke="currentColor" stroke-width="1.8"/>
+        <rect x="17" y="12" width="5" height="9" rx="1" stroke="currentColor" stroke-width="1.8"/>
+        <path d="M12 5.5l.9 1.9 2 .3-1.5 1.4.4 2-1.8-1-1.8 1 .4-2-1.5-1.4 2-.3L12 5.5z" fill="currentColor" stroke="currentColor" stroke-width="0.5"/>
+      </svg>
+    </button>
+    <button id="nav-duels" class="nav-item" aria-label="Дуэли">
+      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M4 4l6 6M20 4l-6 6M4 20l6-6M20 20l-6-6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        <path d="M4 4l2 2M20 4l-2 2M4 20l2-2M20 20l-2-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="7.5" cy="7.5" r="1.2" fill="currentColor"/>
+        <circle cx="16.5" cy="7.5" r="1.2" fill="currentColor"/>
+        <circle cx="7.5" cy="16.5" r="1.2" fill="currentColor"/>
+        <circle cx="16.5" cy="16.5" r="1.2" fill="currentColor"/>
+      </svg>
+    </button>
   </nav>
+  <div class="toast-container" id="toast-container"></div>
   <script src="app.js"></script>
 </body>
 </html>
