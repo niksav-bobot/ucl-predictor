@@ -108,6 +108,16 @@ function levelToName(l) { return ['Без уровня', 'Новичок', 'Пр
 function getLevelBonus(l) { return [0, 0, 0.05, 0.10, 0.15, 0.25][l] || 0; }
 function getLevelThreshold(l) { return [0, 100, 500, 1000, 2000, 5000][l] || 0; }
 
+// ========== Уровни (расшифровка для UI) ==========
+const LEVELS_DATA = [
+  { level: 0, name: 'Без уровня', min: 0,    bonus: 0  },
+  { level: 1, name: 'Новичок',    min: 100,  bonus: 0  },
+  { level: 2, name: 'Прогнозист', min: 500,  bonus: 5  },
+  { level: 3, name: 'Аналитик',   min: 1000, bonus: 10 },
+  { level: 4, name: 'Снайпер',    min: 2000, bonus: 15 },
+  { level: 5, name: 'Профи',      min: 5000, bonus: 25 },
+];
+
 function getMatchdayKey(utcDate) { const d = new Date(utcDate); if (!Number.isFinite(d.getTime())) return null; return d.toISOString().slice(0, 10); }
 function todayUtcKey() { return new Date().toISOString().slice(0, 10); }
 
@@ -266,6 +276,72 @@ async function getBalance(userId) {
     levelBonus: getLevelBonus(level), nextLevelAt: level < 5 ? getLevelThreshold(level + 1) : null, historicalEarned: toNum(p[15], 0) };
 }
 
+// ========== Баланс за сегодня (игровой день) ==========
+async function getTodayBalance(userId) {
+  const uid = String(userId || '').trim();
+  if (!uid) return null;
+
+  const matches = await getSheetData('Matches', 'A:J');
+  const now = Date.now();
+  const FOUR_HOURS = 4 * 60 * 60 * 1000;
+
+  const dayMatches = new Map();
+  matches.forEach(r => {
+    if (!isDataRow(r, 'match_id')) return;
+    const k = getMatchdayKey(r[4]);
+    if (!k) return;
+    if (!dayMatches.has(k)) dayMatches.set(k, []);
+    dayMatches.get(k).push(r);
+  });
+
+  const todayKey = todayUtcKey();
+  let currentMatchday = null;
+
+  // Сегодня есть завершённые матчи — это текущий игровой день
+  const todayFinished = (dayMatches.get(todayKey) || []).filter(r => String(r[5] || '').trim() === 'finished');
+  if (todayFinished.length > 0) {
+    currentMatchday = todayKey;
+  } else {
+    // Иначе смотрим вчера: если последний матч закончился < 4 часов назад — считаем его текущим
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const yFinished = (dayMatches.get(yesterday) || []).filter(r => String(r[5] || '').trim() === 'finished');
+    if (yFinished.length > 0) {
+      const lastFinish = Math.max(...yFinished.map(r => {
+        const t = new Date(r[8] || r[4] || '').getTime();
+        return Number.isFinite(t) ? t : 0;
+      }));
+      if (lastFinish && now - lastFinish < FOUR_HOURS) currentMatchday = yesterday;
+    }
+  }
+
+  if (!currentMatchday) return { date: null, total: 0, breakdown: {}, count: 0 };
+
+  const dayStart = new Date(`${currentMatchday}T00:00:00Z`).getTime();
+  const dayEnd = dayStart + 28 * 60 * 60 * 1000; // 24 ч + 4 ч «хвоста»
+  const upperBound = Math.min(dayEnd, now);
+
+  const txData = await getSheetData('FantikiTransactions', 'A:G');
+  const dayTx = txData.filter(r => {
+    if (!isDataRow(r, 'tx_id')) return false;
+    if (String(r[1] || '').trim() !== uid) return false;
+    const t = new Date(r[5] || '').getTime();
+    if (!Number.isFinite(t)) return false;
+    return t >= dayStart && t <= upperBound;
+  });
+
+  const breakdown = {};
+  let total = 0;
+  dayTx.forEach(r => {
+    const reason = String(r[3] || '').trim();
+    const amount = toNum(r[2], 0);
+    breakdown[reason] = (breakdown[reason] || 0) + amount;
+    total += amount;
+  });
+
+  return { date: currentMatchday, total, breakdown, count: dayTx.length };
+}
+
+// ========== Логика последних прогнозов ==========
 function getLatestPredictionMap(data) {
   const latest = new Map();
   data.forEach((row, idx) => {
@@ -311,6 +387,7 @@ function sortPredictionsResponse(list, sortMode) {
   return [...list].sort(byAsc);
 }
 
+// ========== Авторизация ==========
 function getAdminIds() { return String(process.env.ADMIN_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean); }
 function verifyTelegramInitData(str) {
   try {
@@ -346,7 +423,6 @@ function extractAuthenticatedUser(req) {
   return null;
 }
 
-// FIX: admin bypass — при наличии x-admin-api-key разрешаем userId в теле без initData
 function extractUserId(req) {
   const u = extractAuthenticatedUser(req);
   if (u?.id) return u.id;
@@ -367,6 +443,7 @@ function requireAdmin(req, res, next) {
 }
 const asyncHandler = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
+// ========== Команды и переводы ==========
 const teamTranslations = { 'Real Madrid CF': 'Реал Мадрид', 'FC Barcelona': 'Барселона', 'Manchester City FC': 'Манчестер Сити', 'Liverpool FC': 'Ливерпуль', 'FC Bayern München': 'Бавария', 'Paris Saint-Germain FC': 'ПСЖ', 'Juventus FC': 'Ювентус', 'AC Milan': 'Милан', 'Chelsea FC': 'Челси', 'Arsenal FC': 'Арсенал', 'Borussia Dortmund': 'Боруссия Дортмунд', 'Club Atlético de Madrid': 'Атлетико Мадрид', 'FC Internazionale Milano': 'Интер', 'SSC Napoli': 'Наполи', 'FC Porto': 'Порту', 'SL Benfica': 'Бенфика', 'AFC Ajax': 'Аякс', 'Olympique Lyonnais': 'Лион', 'AS Monaco FC': 'Монако', 'FC Red Bull Salzburg': 'Зальцбург', 'FK Shakhtar Donetsk': 'Шахтер', 'GNK Dinamo Zagreb': 'Динамо Загреб', 'Celtic FC': 'Селтик', 'Rangers FC': 'Рейнджерс', 'Club Brugge KV': 'Брюгге', 'Galatasaray SK': 'Галатасарай', 'Fenerbahçe SK': 'Фенербахче', 'Olympiacos FC': 'Олимпиакос', 'AEK Athens FC': 'АЕК', 'Maccabi Haifa FC': 'Маккаби Хайфа', 'FC København': 'Копенгаген', 'BSC Young Boys': 'Янг Бойз', 'FK Crvena Zvezda': 'Црвена Звезда', 'Racing Club de Lens': 'Ланс', 'Real Sociedad de Fútbol': 'Реал Сосьедад', 'PSV': 'ПСВ', 'Feyenoord Rotterdam': 'Фейеноорд', 'Sporting CP': 'Спортинг', 'Sporting Clube de Portugal': 'Спортинг', 'FC Viktoria Plzeň': 'Виктория Пльзень', 'Stade Brestois 29': 'Брест', 'VfB Stuttgart': 'Штутгарт', 'Aston Villa FC': 'Астон Вилла', 'Bologna FC 1909': 'Болонья', 'Girona FC': 'Жирона', 'RC Celta de Vigo': 'Сельта', 'Real Betis Balompié': 'Бетис', 'Sevilla FC': 'Севилья', 'Valencia CF': 'Валенсия', 'Lazio Roma': 'Лацио', 'Atalanta BC': 'Аталанта', 'AS Roma': 'Рома', 'Olympique de Marseille': 'Марсель', 'Lille OSC': 'Лилль', 'OGC Nice': 'Ницца', 'Stade Rennais FC': 'Ренн', 'RC Strasbourg Alsace': 'Страсбур', 'FC Nantes': 'Нант', 'SC Braga': 'Брага', 'RSC Anderlecht': 'Андерлехт', 'KRC Genk': 'Генк', 'Ferencvárosi TC': 'Ференцварош', 'Ludogorets Razgrad': 'Лудогорец', 'Qarabağ FK': 'Карабах', 'Sparta Praha': 'Спарта Прага', 'Slavia Praha': 'Славия Прага', 'SK Slavia Praha': 'Славия Прага', 'FC Basel 1893': 'Базель', 'Grasshopper Club Zürich': 'Грассхоппер', 'Manchester United FC': 'Манчестер Юнайтед', 'Villarreal CF': 'Вильярреал', 'PAE AEK': 'АЕК', 'LASK Linz': 'ЛАСК', 'Viking FK': 'Викинг', 'ŠK Slovan Bratislava': 'Слован Братислава', 'FK Bodø/Glimt': 'Будё-Глимт', 'Como 1907': 'Комо', 'RB Leipzig': 'РБ Лейпциг', 'Sabah FK': 'Сабах' };
 const teamSynonyms = { 'мс':'Манчестер Сити','ман сити':'Манчестер Сити','мю':'Манчестер Юнайтед','реал':'Реал Мадрид','реал мадрид':'Реал Мадрид','барса':'Барселона','барселона':'Барселона','бавария':'Бавария','дортмунд':'Боруссия Дортмунд','атлетико':'Атлетико Мадрид','интер':'Интер','наполи':'Наполи','псж':'ПСЖ','ливерпуль':'Ливерпуль','челси':'Челси','арсенал':'Арсенал','ювентус':'Ювентус','милан':'Милан','аякс':'Аякс','порту':'Порту','бенфика':'Бенфика','лион':'Лион','монако':'Монако','зальцбург':'Зальцбург','шахтер':'Шахтер','селтик':'Селтик','брюгге':'Брюгге','галатасарай':'Галатасарай','фенербахче':'Фенербахче','олимпиакос':'Олимпиакос','аек':'АЕК','копенгаген':'Копенгаген','янг бойз':'Янг Бойз','црвена звезда':'Црвена Звезда','ланс':'Ланс','реал сосьедад':'Реал Сосьедад','псв':'ПСВ','фейеноорд':'Фейеноорд','спортинг':'Спортинг','штутгарт':'Штутгарт','астон вилла':'Астон Вилла','болонья':'Болонья','жирона':'Жирона','сельта':'Сельта','бетис':'Бетис','севилья':'Севилья','валенсия':'Валенсия','лацио':'Лацио','аталанта':'Аталанта','рома':'Рома','марсель':'Марсель','лилль':'Лилль','ницца':'Ницца','ренн':'Ренн','нант':'Нант','брага':'Брага','андерлехт':'Андерлехт','генк':'Генк','ференцварош':'Ференцварош','лудогорец':'Лудогорец','карабах':'Карабах','базель':'Базель','вильярреал':'Вильярреал','ласк':'ЛАСК','викинг':'Викинг','слован братислава':'Слован Братислава','будё-глимт':'Будё-Глимт','комо':'Комо','рб лейпциг':'РБ Лейпциг','сабах':'Сабах' };
 const teamAliases = new Map();
@@ -1279,6 +1356,16 @@ app.post(WEBHOOK_PATH, (req, res) => {
 });
 
 // ========== API ==========
+
+// ----- Levels (расшифровка для UI) -----
+app.get('/api/levels', (req, res) => res.json(LEVELS_DATA));
+
+// ----- Fantiki today -----
+app.get('/api/fantiki/today/:userId', asyncHandler(async (req, res) => {
+  const info = await getTodayBalance(req.params.userId);
+  if (!info) return res.status(400).json({ error: 'userId required' });
+  res.json(info);
+}));
 
 // ----- DUELS -----
 app.post('/api/duels/create', asyncHandler(async (req, res) => {

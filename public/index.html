@@ -9,11 +9,15 @@
     :root { --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --muted: #94a3b8; --primary: #3b82f6; --success: #10b981; --danger: #ef4444; --border: #334155; }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
     body { background: var(--bg); color: var(--text); padding-bottom: 90px; }
-    .header { position: sticky; top: 0; background: rgba(15,23,42,0.95); backdrop-filter: blur(8px); padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); z-index: 90; }
-    .header-title { font-size: 16px; font-weight: 700; letter-spacing: 0.3px; }
-    .header-balance { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 700; padding: 6px 12px; background: rgba(59,130,246,0.15); border-radius: 20px; border: 1px solid rgba(59,130,246,0.3); }
-    .coin { font-size: 14px; }
-    .level-badge { font-size: 10px; color: var(--muted); padding-left: 6px; border-left: 1px solid var(--border); font-weight: 500; text-transform: uppercase; letter-spacing: 0.3px; }
+    .header { position: sticky; top: 0; background: rgba(15,23,42,0.95); backdrop-filter: blur(8px); padding: 10px 16px; display: flex; justify-content: flex-end; align-items: center; border-bottom: 1px solid var(--border); z-index: 90; }
+    .header-balance { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 700; padding: 8px 14px; background: rgba(59,130,246,0.15); border-radius: 22px; border: 1px solid rgba(59,130,246,0.3); cursor: pointer; transition: background 0.2s; }
+    .header-balance:hover { background: rgba(59,130,246,0.25); }
+    .header-balance .coin { font-size: 15px; }
+    .header-balance .today-amount { font-weight: 700; }
+    .header-balance .today-amount.pos { color: var(--success); }
+    .header-balance .today-amount.neg { color: var(--danger); }
+    .header-balance .today-amount.zero { color: var(--muted); }
+    .level-badge { font-size: 10px; color: var(--muted); padding-left: 8px; border-left: 1px solid var(--border); font-weight: 500; text-transform: uppercase; letter-spacing: 0.3px; }
     .nav-bar { position: fixed; bottom: 0; left: 0; right: 0; background: var(--card); display: flex; justify-content: space-around; align-items: center; padding: 8px 0 env(safe-area-inset-bottom); border-top: 1px solid var(--border); z-index: 100; }
     .nav-item { background: none; border: none; color: var(--muted); padding: 8px 20px; border-radius: 10px; cursor: pointer; transition: color 0.2s, background 0.2s; display: flex; align-items: center; justify-content: center; }
     .nav-item.active { color: var(--primary); background: rgba(59,130,246,0.12); }
@@ -59,7 +63,6 @@
     .position-arrow { display: inline-block; margin-left: 4px; font-weight: bold; font-size: 11px; vertical-align: middle; }
     .position-arrow.up { color: var(--success); }
     .position-arrow.down { color: var(--danger); }
-    .table-level { font-size: 10px; color: var(--muted); display: block; margin-top: 2px; }
     .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 16px; }
     .modal-card { background: var(--card); border-radius: 16px; width: 100%; max-width: 500px; max-height: 85vh; display: flex; flex-direction: column; overflow: hidden; }
     .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 16px; border-bottom: 1px solid var(--border); }
@@ -81,13 +84,11 @@
     .odds-item { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 8px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.08); font-size: 12px; color: #fff; }
     .odds-item strong { color: var(--success); font-size: 13px; }
 
-    /* Формы */
     .form-label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 6px; text-transform: uppercase; letter-spacing: 0.3px; font-weight: 600; }
     .form-input { width: 100%; padding: 10px 12px; font-size: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); }
     .form-input:focus { outline: none; border-color: var(--primary); }
     select.form-input { appearance: none; }
 
-    /* Дуэли */
     .duel-tabs { display: flex; gap: 4px; background: rgba(255,255,255,0.05); padding: 4px; border-radius: 10px; margin-bottom: 16px; }
     .duel-tab { flex: 1; background: none; border: none; color: var(--muted); padding: 8px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; }
     .duel-tab.active { background: var(--primary); color: white; }
@@ -110,21 +111,51 @@
     .toast.success { border-color: var(--success); color: var(--success); }
     .toast.error { border-color: var(--danger); color: var(--danger); }
     @keyframes toast-in { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* Баланс / уровни / транзакции */
+    .balance-total { font-size: 18px; margin-bottom: 4px; }
+    .modal-section-title { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin: 20px 0 10px; font-weight: 600; }
+    .modal-section-title:first-child { margin-top: 0; }
+    .today-summary { background: rgba(255,255,255,0.04); border-radius: 10px; padding: 12px; }
+    .today-total { font-size: 20px; font-weight: 700; margin-bottom: 8px; }
+    .today-breakdown { list-style: none; }
+    .today-breakdown li { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; }
+    .levels-list { display: flex; flex-direction: column; gap: 4px; }
+    .level-row { display: grid; grid-template-columns: 28px 1fr auto auto; gap: 8px; padding: 8px 10px; border-radius: 8px; font-size: 13px; align-items: center; }
+    .level-row.level-current { background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.3); }
+    .level-num { color: var(--muted); font-weight: 600; }
+    .level-name { font-weight: 500; }
+    .level-req { color: var(--muted); font-size: 12px; }
+    .level-bonus { color: var(--success); font-weight: 600; font-size: 12px; }
+    .tx-list { list-style: none; }
+    .tx-list li { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; align-items: center; }
+    .tx-list li:last-child { border-bottom: none; }
+    .tx-list li .tx-sub { grid-column: 1 / -1; font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .tx-amount { font-weight: 600; }
+
+    /* Профиль */
+    .profile-section { padding: 12px 0; border-bottom: 1px solid var(--border); }
+    .profile-section:first-child { padding-top: 0; }
+    .profile-section:last-of-type { border-bottom: none; }
+    .profile-balance { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
+    .profile-level-click { cursor: pointer; padding: 12px; background: rgba(255,255,255,0.04); border-radius: 10px; margin: 12px 0; transition: background 0.2s; }
+    .profile-level-click:hover { background: rgba(255,255,255,0.08); }
+    .profile-badges { display: flex; flex-wrap: wrap; gap: 6px; }
+    .profile-badge { background: rgba(59,130,246,0.15); color: var(--primary); padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 500; }
   </style>
 </head>
 <body>
   <header class="header">
-    <div class="header-title">UCL Predictor</div>
-    <div class="header-balance" id="header-balance">
+    <div class="header-balance" id="header-clickable" title="Нажмите, чтобы увидеть все начисления">
       <span class="coin">🪙</span>
-      <span id="balance-value">—</span>
+      <span id="today-value" class="today-amount zero">—</span>
       <span class="level-badge" id="level-badge" style="display:none"></span>
     </div>
   </header>
   <div id="app"></div>
   <nav class="nav-bar">
     <button id="nav-matches" class="nav-item active" aria-label="Матчи">
-      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <svg viewBox="0 0 24 24" fill="none">
         <rect x="2" y="5" width="20" height="14" rx="2.5" stroke="currentColor" stroke-width="1.8"/>
         <line x1="12" y1="5" x2="12" y2="19" stroke="currentColor" stroke-width="1.8"/>
         <circle cx="12" cy="12" r="2.8" stroke="currentColor" stroke-width="1.8"/>
@@ -133,28 +164,31 @@
       </svg>
     </button>
     <button id="nav-my-predictions" class="nav-item" aria-label="Мои прогнозы">
-      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <svg viewBox="0 0 24 24" fill="none">
         <circle cx="12" cy="12" r="9.5" stroke="currentColor" stroke-width="1.8"/>
-        <path d="M12 6.5l3.2 2.3-1.2 3.8h-4l-1.2-3.8L12 6.5z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-        <path d="M6.8 10.2l-2.6-.8M17.2 10.2l2.6-.8M9.2 16.8l-1.6 2.4M14.8 16.8l1.6 2.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        <polygon points="12,7.2 15.2,9.5 14,13.3 10,13.3 8.8,9.5" fill="currentColor" fill-opacity="0.35" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+        <line x1="12" y1="7.2" x2="12" y2="2.5" stroke="currentColor" stroke-width="1.4"/>
+        <line x1="15.2" y1="9.5" x2="20.5" y2="8.5" stroke="currentColor" stroke-width="1.4"/>
+        <line x1="14" y1="13.3" x2="17" y2="18.5" stroke="currentColor" stroke-width="1.4"/>
+        <line x1="10" y1="13.3" x2="7" y2="18.5" stroke="currentColor" stroke-width="1.4"/>
+        <line x1="8.8" y1="9.5" x2="3.5" y2="8.5" stroke="currentColor" stroke-width="1.4"/>
       </svg>
     </button>
     <button id="nav-standings" class="nav-item" aria-label="Таблица">
-      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <rect x="2" y="14" width="5" height="7" rx="1" stroke="currentColor" stroke-width="1.8"/>
-        <rect x="9.5" y="9" width="5" height="12" rx="1" stroke="currentColor" stroke-width="1.8"/>
-        <rect x="17" y="12" width="5" height="9" rx="1" stroke="currentColor" stroke-width="1.8"/>
-        <path d="M12 5.5l.9 1.9 2 .3-1.5 1.4.4 2-1.8-1-1.8 1 .4-2-1.5-1.4 2-.3L12 5.5z" fill="currentColor" stroke="currentColor" stroke-width="0.5"/>
+      <svg viewBox="0 0 24 24" fill="none">
+        <rect x="3" y="14" width="5" height="7" rx="0.8" stroke="currentColor" stroke-width="1.8"/>
+        <rect x="9.5" y="9" width="5" height="12" rx="0.8" stroke="currentColor" stroke-width="1.8"/>
+        <rect x="16" y="12" width="5" height="9" rx="0.8" stroke="currentColor" stroke-width="1.8"/>
       </svg>
     </button>
     <button id="nav-duels" class="nav-item" aria-label="Дуэли">
-      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M4 4l6 6M20 4l-6 6M4 20l6-6M20 20l-6-6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-        <path d="M4 4l2 2M20 4l-2 2M4 20l2-2M20 20l-2-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-        <circle cx="7.5" cy="7.5" r="1.2" fill="currentColor"/>
-        <circle cx="16.5" cy="7.5" r="1.2" fill="currentColor"/>
-        <circle cx="7.5" cy="16.5" r="1.2" fill="currentColor"/>
-        <circle cx="16.5" cy="16.5" r="1.2" fill="currentColor"/>
+      <svg viewBox="0 0 24 24" fill="none">
+        <line x1="4" y1="4" x2="18" y2="18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        <line x1="20" y1="4" x2="6" y2="18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        <line x1="18" y1="18" x2="21" y2="21" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+        <line x1="6" y1="18" x2="3" y2="21" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+        <line x1="15.5" y1="16.5" x2="18.5" y2="13.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        <line x1="8.5" y1="16.5" x2="5.5" y2="13.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
       </svg>
     </button>
   </nav>
