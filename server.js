@@ -38,6 +38,68 @@ let oddsCache = { fetchedAt: 0, events: [] };
 
 const EXPECTED_COLUMNS = { Users: 12, Predictions: 9, Matches: 10, MatchEvents: 7 };
 
+// ========== Кэш Google Sheets + retry на 429 ==========
+const sheetCache = new Map(); // cacheKey -> { data, expiresAt }
+const SHEET_CACHE_TTL_MS = 45 * 1000; // 45 секунд
+
+async function sheetsRequestWithRetry(fn, maxRetries = 5) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      const isRateLimit =
+        error?.code === 429 ||
+        error?.status === 429 ||
+        String(error?.message || '').includes('429') ||
+        String(error?.message || '').includes('Quota exceeded');
+      if (!isRateLimit || attempt === maxRetries) throw error;
+      const delay = Math.min(2 ** attempt * 1000 + Math.floor(Math.random() * 1000), 16000);
+      console.warn(`429 Quota exceeded. Повтор через ${Math.round(delay / 1000)}с (попытка ${attempt + 1}/${maxRetries})`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
+function invalidateSheetCache(sheet) {
+  for (const key of [...sheetCache.keys()]) {
+    if (key.startsWith(`${sheet}!`)) sheetCache.delete(key);
+  }
+}
+
+async function getSheetData(sheet, range) {
+  const cacheKey = `${sheet}!${range}`;
+  const cached = sheetCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiresAt) return cached.data;
+  const res = await sheetsRequestWithRetry(() =>
+    sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${quoteSheetName(sheet)}!${range}`,
+    })
+  );
+  const data = res.data.values || [];
+  sheetCache.set(cacheKey, { data, expiresAt: Date.now() + SHEET_CACHE_TTL_MS });
+  return data;
+}
+
+// Один запрос batchGet вместо нескольких последовательных get.
+async function batchGetSheets(sheetRanges) {
+  const ranges = sheetRanges.map(({ sheet, range }) => `${quoteSheetName(sheet)}!${range}`);
+  const res = await sheetsRequestWithRetry(() =>
+    sheets.spreadsheets.values.batchGet({ spreadsheetId: SHEET_ID, ranges })
+  );
+  const result = {};
+  (res.data.valueRanges || []).forEach((vr, i) => {
+    const { sheet, range } = sheetRanges[i];
+    const key = `${sheet}!${range}`;
+    const data = vr.values || [];
+    sheetCache.set(key, { data, expiresAt: Date.now() + SHEET_CACHE_TTL_MS });
+    result[sheet] = data;
+  });
+  // Если какой-то лист не вернулся — отдаём пустой массив.
+  sheetRanges.forEach(({ sheet }) => { if (!(sheet in result)) result[sheet] = []; });
+  return result;
+}
+
 // ========== Вспомогательные функции ==========
 function isNotEmpty(v) { return v !== null && v !== undefined && String(v).trim() !== ''; }
 function toNum(v, f = 0) { const n = Number(v); return Number.isFinite(n) ? n : f; }
@@ -50,32 +112,45 @@ function rangeForRow(sheet, idx, cols) { return `${quoteSheetName(sheet)}!A${idx
 function isDifferentRow(o, n, len) { for (let i = 0; i < len; i++) { if (String(o?.[i] ?? '').trim() !== String(n?.[i] ?? '').trim()) return true; } return false; }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ========== Google Sheets API ==========
-async function getSheetData(sheet, range) {
-  const res = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${quoteSheetName(sheet)}!${range}` });
-  return res.data.values || [];
-}
+// ========== Google Sheets API (запись) ==========
 async function appendRows(sheet, rows) {
   if (!rows.length) return;
   const len = EXPECTED_COLUMNS[sheet] || Math.max(...rows.map(r => r.length));
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SHEET_ID, range: `${quoteSheetName(sheet)}!A:A`, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
-    resource: { values: rows.map(r => padRow(r, len)) },
-  });
+  await sheetsRequestWithRetry(() =>
+    sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: `${quoteSheetName(sheet)}!A:A`,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      resource: { values: rows.map(r => padRow(r, len)) },
+    })
+  );
+  invalidateSheetCache(sheet);
 }
 async function batchWriteRows(sheet, updates) {
   if (!updates.length) return;
   const len = EXPECTED_COLUMNS[sheet] || 26;
   for (let i = 0; i < updates.length; i += 200) {
-    const chunk = updates.slice(i, i + 200).map(u => ({ range: rangeForRow(sheet, u.rowIndex, len), values: [padRow(u.values, len)] }));
-    await sheets.spreadsheets.values.batchUpdate({ spreadsheetId: SHEET_ID, requestBody: { valueInputOption: 'RAW', data: chunk } });
+    const chunk = updates.slice(i, i + 200).map(u => ({
+      range: rangeForRow(sheet, u.rowIndex, len),
+      values: [padRow(u.values, len)],
+    }));
+    await sheetsRequestWithRetry(() =>
+      sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: { valueInputOption: 'RAW', data: chunk },
+      })
+    );
   }
+  invalidateSheetCache(sheet);
 }
 async function writeRow(sheet, idx, values) { await batchWriteRows(sheet, [{ rowIndex: idx, values }]); }
 const sheetIdCache = {};
 async function getSheetIdByName(name) {
   if (sheetIdCache[name] !== undefined) return sheetIdCache[name];
-  const res = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID, fields: 'sheets.properties' });
+  const res = await sheetsRequestWithRetry(() =>
+    sheets.spreadsheets.get({ spreadsheetId: SHEET_ID, fields: 'sheets.properties' })
+  );
   const sheet = res.data.sheets?.find(s => s.properties?.title === name);
   if (!sheet) throw new Error(`Sheet not found: ${name}`);
   sheetIdCache[name] = sheet.properties.sheetId;
@@ -87,11 +162,18 @@ async function deleteRowsByRowIndices(sheet, indexes) {
   const sheetId = await getSheetIdByName(sheet);
   for (let i = 0; i < unique.length; i += 200) {
     const chunk = unique.slice(i, i + 200);
-    await sheets.spreadsheets.batchUpdate({
-      spreadsheetId: SHEET_ID,
-      requestBody: { requests: chunk.map(idx => ({ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex: idx, endIndex: idx + 1 } } })) },
-    });
+    await sheetsRequestWithRetry(() =>
+      sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: {
+          requests: chunk.map(idx => ({
+            deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex: idx, endIndex: idx + 1 } },
+          })),
+        },
+      })
+    );
   }
+  invalidateSheetCache(sheet);
 }
 
 // ========== Логика последних прогнозов ==========
@@ -280,7 +362,11 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
   const ah = toScore(homeScore), aa = toScore(awayScore);
   if (ah === null || aa === null) return 0;
   const matchIdStr = String(matchId).trim();
-  const predictionsData = await getSheetData('Predictions', 'A:Z');
+  // batchGet — один запрос к API вместо двух
+  const { Predictions: predictionsData, Users: usersData } = await batchGetSheets([
+    { sheet: 'Predictions', range: 'A:Z' },
+    { sheet: 'Users', range: 'A:Z' },
+  ]);
   const latestMap = getLatestPredictionMap(predictionsData);
   const predictionUpdates = [];
   const userDeltas = new Map();
@@ -315,7 +401,6 @@ async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
   });
   await batchWriteRows('Predictions', predictionUpdates);
   if (userDeltas.size > 0) {
-    const usersData = await getSheetData('Users', 'A:Z');
     const userUpdates = [];
     for (const [userId, delta] of userDeltas.entries()) {
       const rowIndex = usersData.findIndex(r => isDataRow(r, 'user_id') && String(r[0]).trim() === userId);
@@ -369,7 +454,6 @@ async function fetchUCLMatches() {
       if (oldStatus !== 'finished' || oldHome !== apiHome || oldAway !== apiAway) { ru = new Date().toISOString(); shouldRecalc = true; }
     } else if (status !== 'finished') {
       hs = ''; as = ''; ru = '';
-      // FIX: если матч перестал быть finished — пересчитываем очки (обнуляем)
       if (oldStatus === 'finished') shouldRecalc = true;
     }
     const updated = [matchId, stage, homeTeam, awayTeam, kickoffUtc, status, hs, as, ru, current[9] || 'FALSE'];
@@ -428,9 +512,11 @@ function buildEventRows(matchId, events, homeTeam, awayTeam) {
   return rows;
 }
 async function updateMatchEventsForFinished() {
-  const matchesData = await getSheetData('Matches', 'A:J');
+  const { Matches: matchesData, MatchEvents: existingEvents } = await batchGetSheets([
+    { sheet: 'Matches', range: 'A:J' },
+    { sheet: 'MatchEvents', range: 'A:G' },
+  ]);
   const finishedMatches = matchesData.filter(r => isDataRow(r, 'match_id') && String(r[5] || '').trim() === 'finished');
-  const existingEvents = await getSheetData('MatchEvents', 'A:G');
   const existingMatchIds = new Set(existingEvents.filter(r => isDataRow(r, 'match_id')).map(r => String(r[0]).trim()));
   const matchesToProcess = finishedMatches.filter(r => !existingMatchIds.has(String(r[0]).trim())).slice(0, EVENTS_BATCH_SIZE);
   for (const matchRow of matchesToProcess) {
@@ -452,9 +538,11 @@ async function updateMatchEventsForFinished() {
 }
 
 async function recalculateAll() {
-  const usersData = await getSheetData('Users', 'A:Z');
-  const predictionsData = await getSheetData('Predictions', 'A:Z');
-  const matchesData = await getSheetData('Matches', 'A:J');
+  const { Users: usersData, Predictions: predictionsData, Matches: matchesData } = await batchGetSheets([
+    { sheet: 'Users', range: 'A:Z' },
+    { sheet: 'Predictions', range: 'A:Z' },
+    { sheet: 'Matches', range: 'A:J' },
+  ]);
   const finishedMatches = new Map();
   matchesData.forEach(row => {
     if (!isDataRow(row, 'match_id')) return;
@@ -518,7 +606,7 @@ async function recalculateAll() {
     if (rowIndex === undefined) continue;
     const updatedUser = padRow(usersData[rowIndex], EXPECTED_COLUMNS.Users);
     updatedUser[4] = stats.totalPoints;
-    updatedUser[5] = stats.totalPredictions;   // FIX: заполняем total_predictions
+    updatedUser[5] = stats.totalPredictions;
     updatedUser[6] = stats.successfulPredictions;
     updatedUser[7] = stats.exactScores;
     updatedUser[8] = stats.goalDifference;
@@ -533,8 +621,10 @@ async function recalculateAll() {
 }
 
 async function getUserPredictionsResponse(userId, query = {}) {
-  const matchesData = await getSheetData('Matches', 'A:J');
-  const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const { Matches: matchesData, Predictions: predictionsData } = await batchGetSheets([
+    { sheet: 'Matches', range: 'A:J' },
+    { sheet: 'Predictions', range: 'A:Z' },
+  ]);
   const matches = matchesData.filter(r => isDataRow(r, 'match_id'));
   const userPredictions = getLatestPredictionsForUser(predictionsData, userId);
   let result = userPredictions.map(prediction => {
@@ -549,7 +639,7 @@ async function getUserPredictionsResponse(userId, query = {}) {
   return sortPredictionsResponse(result, query.sort);
 }
 
-// ========== Telegram Polling (с защитой от 409) ==========
+// ========== Telegram Polling ==========
 let telegramOffset = 0;
 let conflictCounter = 0;
 async function callTelegram(method, params) {
@@ -558,8 +648,6 @@ async function callTelegram(method, params) {
   if (!response.ok) { const text = await response.text(); throw new Error(`Telegram API error: ${response.status} ${text}`); }
   return response.json();
 }
-
-// FIX: регулярка требует пробелы вокруг разделителя — не ломается на «Будё-Глимт»
 function parsePredictionText(text) {
   const clean = String(text || '').replace(/^\/predict(?:@\w+)?\s+/i, '').trim();
   const match = clean.match(/^(.+?)\s+[-–—]\s+(.+?)\s+(\d{1,2})\s*:\s*(\d{1,2})$/i);
@@ -568,7 +656,6 @@ function parsePredictionText(text) {
   if (!home || !away) return null;
   return { home, away, homeScore: Number(match[3]), awayScore: Number(match[4]) };
 }
-
 async function processTelegramMessage(msg) {
   const chatId = msg.chat?.id, from = msg.from, text = msg.text || '';
   if (!text || !from) return;
@@ -584,7 +671,6 @@ async function processTelegramMessage(msg) {
   if (!lines.length) return;
   const matchesData = await getSheetData('Matches', 'A:J');
   const matches = matchesData.filter(row => isDataRow(row, 'match_id'));
-  // FIX: читаем Predictions один раз
   let predictionsData = await getSheetData('Predictions', 'A:Z');
   let savedCount = 0;
   for (const line of lines) {
@@ -598,18 +684,15 @@ async function processTelegramMessage(msg) {
     const existingIndexes = [];
     predictionsData.forEach((row, idx) => { if (isDataRow(row, 'prediction_id') && String(row[1]).trim() === userId && String(row[2]).trim() === matchId) existingIndexes.push(idx); });
     await deleteRowsByRowIndices('Predictions', existingIndexes);
-    // локально обновим снимок, чтобы следующая строка видела актуальные данные
     predictionsData = predictionsData.filter((_, i) => !existingIndexes.includes(i));
     await appendRows('Predictions', [[`${userId}_${matchId}`, userId, matchId, parsed.homeScore, parsed.awayScore, new Date().toISOString(), new Date().toISOString(), 0, '']]);
     savedCount++;
   }
   if (savedCount > 0) await callTelegram('sendMessage', { chat_id: chatId, text: `✅ Сохранено прогнозов: ${savedCount}` });
 }
-
 async function startBotPolling() {
   if (!BOT_TOKEN) return;
   console.log('Запуск Telegram polling...');
-  // FIX: удаляем webhook, чтобы не было 409 Conflict при старте
   try {
     await callTelegram('deleteWebhook', { drop_pending_updates: false });
     console.log('Webhook удалён, начинаем polling.');
@@ -646,10 +729,13 @@ async function startBotPolling() {
   }
 }
 
-// ========== История позиций (стрелки ▲▼) ==========
+// ========== API-маршруты ==========
+
 app.get('/api/standings-history', asyncHandler(async (req, res) => {
-  const matchesData = await getSheetData('Matches', 'A:J');
-  const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const { Matches: matchesData, Predictions: predictionsData } = await batchGetSheets([
+    { sheet: 'Matches', range: 'A:J' },
+    { sheet: 'Predictions', range: 'A:Z' },
+  ]);
   const finishedMatches = matchesData.filter(row => isDataRow(row, 'match_id') && String(row[5] || '').trim() === 'finished').map(row => ({ matchId: String(row[0]).trim(), timestamp: new Date(row[8] || row[4] || '').getTime() || 0 })).sort((a, b) => a.timestamp - b.timestamp);
   if (!finishedMatches.length) return res.json({ previousPositions: {}, currentPositions: {} });
   const allIds = finishedMatches.map(m => m.matchId);
@@ -672,12 +758,13 @@ app.get('/api/standings-history', asyncHandler(async (req, res) => {
   res.json({ previousPositions: calc(previousIds), currentPositions: calc(allIds) });
 }));
 
-// ========== Динамика очков пользователя ==========
 app.get('/api/user-points-history/:userId', asyncHandler(async (req, res) => {
   const userId = String(req.params.userId || '').trim();
   if (!userId) return res.status(400).json({ error: 'userId required' });
-  const matchesData = await getSheetData('Matches', 'A:J');
-  const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const { Matches: matchesData, Predictions: predictionsData } = await batchGetSheets([
+    { sheet: 'Matches', range: 'A:J' },
+    { sheet: 'Predictions', range: 'A:Z' },
+  ]);
   const matchById = new Map();
   matchesData.forEach(row => { if (isDataRow(row, 'match_id')) matchById.set(String(row[0]).trim(), row); });
   const latestMap = getLatestPredictionMap(predictionsData);
@@ -700,16 +787,19 @@ app.get('/api/user-points-history/:userId', asyncHandler(async (req, res) => {
   res.json(history);
 }));
 
-// ========== Турнирная таблица за последние 3 дня ==========
 app.get('/api/standings-last-round', asyncHandler(async (req, res) => {
-  const matchesData = await getSheetData('Matches', 'A:J');
-  const predictionsData = await getSheetData('Predictions', 'A:Z');
-  const usersData = await getSheetData('Users', 'A:Z');
+  const { Matches: matchesData, Predictions: predictionsData, Users: usersData } = await batchGetSheets([
+    { sheet: 'Matches', range: 'A:J' },
+    { sheet: 'Predictions', range: 'A:Z' },
+    { sheet: 'Users', range: 'A:Z' },
+  ]);
   const finishedMatches = matchesData.filter(row => isDataRow(row, 'match_id') && String(row[5] || '').trim() === 'finished').map(row => ({ matchId: String(row[0]).trim(), timestamp: new Date(row[8] || row[4] || '').getTime() || 0 })).filter(m => m.timestamp > 0).sort((a, b) => b.timestamp - a.timestamp);
   if (!finishedMatches.length) return res.json([]);
   const cutoff = finishedMatches[0].timestamp - (3 * 24 * 60 * 60 * 1000);
   const roundMatchIds = new Set(finishedMatches.filter(m => m.timestamp >= cutoff).map(m => m.matchId));
   const latestMap = getLatestPredictionMap(predictionsData);
+  const matchById = new Map();
+  matchesData.forEach(r => { if (isDataRow(r, 'match_id')) matchById.set(String(r[0]).trim(), r); });
   const perUser = new Map();
   for (const item of latestMap.values()) {
     const row = predictionsData[item.idx];
@@ -718,7 +808,7 @@ app.get('/api/standings-last-round', asyncHandler(async (req, res) => {
     if (!roundMatchIds.has(matchId) || String(row[8] || '').trim() === 'duplicate') continue;
     const uid = String(row[1] || '').trim();
     if (!uid) continue;
-    const match = matchesData.find(r => isDataRow(r, 'match_id') && String(r[0]).trim() === matchId);
+    const match = matchById.get(matchId);
     if (!match) continue;
     const hs = toScore(match[6]), as = toScore(match[7]);
     if (hs === null || as === null) continue;
@@ -739,7 +829,6 @@ app.get('/api/standings-last-round', asyncHandler(async (req, res) => {
   res.json(table);
 }));
 
-// ========== Основные маршруты ==========
 app.post('/api/auth', asyncHandler(async (req, res) => {
   const initDataString = req.body.initData;
   let user = null;
@@ -763,10 +852,12 @@ app.post('/api/auth', asyncHandler(async (req, res) => {
 
 app.get('/api/matches', asyncHandler(async (req, res) => {
   const userId = req.query.userId ? String(req.query.userId).trim() : null;
-  const matchesData = await getSheetData('Matches', 'A:J');
+  const { Matches: matchesData, Predictions: predictionsData } = await batchGetSheets([
+    { sheet: 'Matches', range: 'A:J' },
+    { sheet: 'Predictions', range: 'A:Z' },
+  ]);
   const matches = matchesData.filter(row => isDataRow(row, 'match_id'));
-  let userPredictions = [];
-  if (userId) userPredictions = getLatestPredictionsForUser(await getSheetData('Predictions', 'A:Z'), userId);
+  const userPredictions = userId ? getLatestPredictionsForUser(predictionsData, userId) : [];
   let result = matches.map(row => {
     const matchId = String(row[0]).trim();
     const userPrediction = userPredictions.find(p => String(p[2]).trim() === matchId);
@@ -830,10 +921,12 @@ app.post('/api/admin/match-result', requireAdmin, asyncHandler(async (req, res) 
 
 app.get('/api/match-predictions/:matchId', asyncHandler(async (req, res) => {
   const matchId = String(req.params.matchId || '').trim();
-  const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const { Predictions: predictionsData, Users: usersData } = await batchGetSheets([
+    { sheet: 'Predictions', range: 'A:Z' },
+    { sheet: 'Users', range: 'A:Z' },
+  ]);
   const latestMap = getLatestPredictionMap(predictionsData);
   const matchPredictions = [...latestMap.values()].map(item => predictionsData[item.idx]).filter(row => row && String(row[2] || '').trim() === matchId);
-  const usersData = await getSheetData('Users', 'A:Z');
   const userMap = new Map();
   usersData.forEach(row => { if (isDataRow(row, 'user_id')) userMap.set(String(row[0]).trim(), row[2] || row[1] || String(row[0]).trim()); });
   res.json(matchPredictions.map(prediction => ({ userId: String(prediction[1] || '').trim(), displayName: userMap.get(String(prediction[1] || '').trim()) || prediction[1], predictedHome: toScore(prediction[3]), predictedAway: toScore(prediction[4]), points: toNum(prediction[7], 0), predictionType: prediction[8] || '' })));
@@ -896,7 +989,7 @@ app.get('/api/standings', asyncHandler(async (req, res) => {
     });
   } else if (sortBy && sortableFields[sortBy]) {
     const field = sortableFields[sortBy];
-    const order = requestedOrder ? (requestedOrder === 'asc' ? 1 : -1) : (sortBy === 'misses' ? 1 : -1);
+    const order = requestedOrder ? (requestedOrder === 'asc' ? 1 : -1) : -1;
     table.sort((a, b) => ((a[field] || 0) - (b[field] || 0)) * order || String(a.userId).localeCompare(String(b.userId), 'ru', { numeric: true }));
   } else {
     table.sort((a, b) => {
@@ -925,10 +1018,18 @@ let syncInProgress = false;
 async function scheduledSync() {
   if (syncInProgress) return;
   syncInProgress = true;
-  try { await fetchUCLMatches(); await updateFinishedMatches(); await updateMatchEventsForFinished(); } catch (e) { console.error(e); } finally { syncInProgress = false; }
+  try { await fetchUCLMatches(); await updateFinishedMatches(); await updateMatchEventsForFinished(); }
+  catch (e) { console.error(e); }
+  finally { syncInProgress = false; }
 }
-if (AUTO_SYNC && FOOTBALL_DATA_API_KEY) { setTimeout(() => scheduledSync().catch(console.error), 10000); setInterval(() => scheduledSync().catch(console.error), SYNC_INTERVAL_MS); }
+if (AUTO_SYNC && FOOTBALL_DATA_API_KEY) {
+  setTimeout(() => scheduledSync().catch(console.error), 10000);
+  setInterval(() => scheduledSync().catch(console.error), SYNC_INTERVAL_MS);
+}
 
 const PORT = process.env.PORT || 3000;
-const server = app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); if (BOT_TOKEN) startBotPolling().catch(console.error); });
+const server = app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  if (BOT_TOKEN) startBotPolling().catch(console.error);
+});
 server.on('error', err => console.error('Server error:', err));
