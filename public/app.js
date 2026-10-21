@@ -68,7 +68,7 @@ async function loadOddsForMatches(matches) {
   if (!matches.length) return;
   await Promise.allSettled(matches.map(async match => {
     const container = document.querySelector(`[data-odds-match="${match.match_id}"]`);
-    if (!container) return;
+    if (!container || !container.isConnected) return;
     try {
       const data = await apiJson(`/api/match-odds/${encodeURIComponent(match.match_id)}`);
       if (data?.enabled && data?.odds) {
@@ -192,6 +192,7 @@ async function loadStandings(sortBy = state.standingsSort.sortBy, order = state.
     const [table, historyData] = await Promise.all([apiJson(url), apiJson('/api/standings-history').catch(() => ({ previousPositions: {}, currentPositions: {} }))]);
     const { previousPositions, currentPositions } = historyData;
     app.innerHTML = `<div class="section-header"><h2>Турнирная таблица</h2><span class="badge">${table.length} участников</span></div><div class="standings-hint">Нажимай на имя — все прогнозы участника. На цифру в колонке — матчи соответствующей категории.</div><div class="filter-bar standings-sort-bar"><button data-sort="" class="${!sortBy ? 'active' : ''}">Комплексно</button><button data-sort="points" class="${sortBy === 'points' ? 'active' : ''}">Очки</button><button data-sort="exact" class="${sortBy === 'exact' ? 'active' : ''}">Точные</button><button data-sort="difference" class="${sortBy === 'difference' ? 'active' : ''}">Разницы</button><button data-sort="draws" class="${sortBy === 'draws' ? 'active' : ''}">Ничьи</button><button data-sort="outcomes" class="${sortBy === 'outcomes' ? 'active' : ''}">Исходы</button><button data-sort="misses" class="${sortBy === 'misses' ? 'active' : ''}">Промахи</button><button id="show-last-round" class="secondary-button" style="margin-left: auto;">🏆 Тур</button></div><div class="responsive-table standings-table-wrap"><table class="standings-table"><thead><tr><th>#</th><th>Участник</th><th><button class="table-sort" data-sort="points">Очки${sortArrow('points')}</button></th><th><button class="table-sort" data-sort="successful">Угадано${sortArrow('successful')}</button></th><th><button class="table-sort" data-sort="exact">Точные${sortArrow('exact')}</button></th><th><button class="table-sort" data-sort="difference">Разницы${sortArrow('difference')}</button></th><th><button class="table-sort" data-sort="draws">Ничьи${sortArrow('draws')}</button></th><th><button class="table-sort" data-sort="outcomes">Исходы${sortArrow('outcomes')}</button></th><th><button class="table-sort" data-sort="misses">Промахи${sortArrow('misses')}</button></th></tr></thead><tbody id="standings-body"></tbody></table></div>`;
+    // FIX: сначала вешаем обработчик на "🏆 Тур"
     document.getElementById('show-last-round').onclick = showLastRoundStandings;
     const body = document.getElementById('standings-body');
     if (!table.length) body.innerHTML = '<tr><td colspan="9">Нет участников.</td></tr>';
@@ -214,7 +215,15 @@ async function loadStandings(sortBy = state.standingsSort.sortBy, order = state.
       });
     }
     document.querySelectorAll('.table-sort').forEach(b => { b.onclick = () => { const n = nextStandingsSort(b.dataset.sort); loadStandings(n.sortBy, n.order); }; });
-    document.querySelectorAll('.standings-sort-bar button').forEach(b => { b.onclick = () => { const s = b.dataset.sort; if (!s) { state.standingsSort = { sortBy: '', order: '' }; loadStandings('', ''); return; } const n = nextStandingsSort(s); loadStandings(n.sortBy, n.order); }; });
+    // FIX: исключаем кнопку "🏆 Тур" из общего цикла
+    document.querySelectorAll('.standings-sort-bar button:not(#show-last-round)').forEach(b => {
+      b.onclick = () => {
+        const s = b.dataset.sort;
+        if (!s) { state.standingsSort = { sortBy: '', order: '' }; loadStandings('', ''); return; }
+        const n = nextStandingsSort(s);
+        loadStandings(n.sortBy, n.order);
+      };
+    });
   } catch (error) { app.innerHTML = `<div class="empty-state error">Ошибка загрузки таблицы: ${escapeHtml(error.message)}</div>`; }
 }
 

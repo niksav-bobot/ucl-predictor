@@ -1,276 +1,934 @@
-const tg = window.Telegram.WebApp;
-tg.ready();
-tg.expand();
-const userId = tg.initDataUnsafe?.user?.id;
-const initData = tg.initData;
-const state = { standingsSort: { sortBy: '', order: '' }, myPredictionFilter: 'all', pastMatchesOpen: false };
+require('dotenv').config();
+const express = require('express');
+const { google } = require('googleapis');
+const crypto = require('crypto');
 
-function escapeHtml(v) { return String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;'); }
-function formatDateTime(v) { const d = new Date(v); if (!Number.isFinite(d.getTime())) return 'Дата не указана'; return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }); }
-function formatDay(v) { const d = new Date(v); if (!Number.isFinite(d.getTime())) return 'Без даты'; return d.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }); }
-function getDayKey(v) { const d = new Date(v); if (!Number.isFinite(d.getTime())) return 'unknown'; return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
-function typeLabel(t) { return { exact: 'Точный счёт', difference: 'Разница', draw: 'Ничья', outcome: 'Исход', miss: 'Промах' }[t] || ''; }
+const app = express();
+app.use(express.json());
+app.use(express.static('public'));
 
-async function apiJson(url, options = {}) {
-  const response = await fetch(url, options);
-  let data = null;
-  try { data = await response.json(); } catch { data = null; }
-  if (!response.ok) throw new Error(data?.error || `Ошибка HTTP ${response.status}`);
-  return data;
+// ========== Google Sheets ==========
+const auth = new google.auth.GoogleAuth({
+  credentials: {
+    client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+    private_key: (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+  },
+  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+});
+const sheets = google.sheets({ version: 'v4', auth });
+
+const SHEET_ID = process.env.GOOGLE_SHEET_ID;
+const FOOTBALL_DATA_API_KEY = process.env.FOOTBALL_DATA_API_KEY;
+const FOOTBALL_DATA_BASE_URL = 'https://api.football-data.org/v4';
+const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const TELEGRAM_API_BASE = 'https://api.telegram.org';
+const SEASON = process.env.FOOTBALL_SEASON || '2026';
+const EVENTS_BATCH_SIZE = Number(process.env.EVENTS_BATCH_SIZE || 4);
+const SYNC_INTERVAL_MS = (Number(process.env.SYNC_INTERVAL_MINUTES || 15) * 60 * 1000);
+const AUTO_SYNC = String(process.env.AUTO_SYNC || '').toLowerCase() !== 'false';
+const ALLOW_PLAIN_USER_ID = String(process.env.ALLOW_PLAIN_USER_ID || '').toLowerCase() !== 'false';
+
+// ========== Odds API ==========
+const ODDS_API_KEY = process.env.ODDS_API_KEY || '';
+const ODDS_API_BASE_URL = process.env.ODDS_API_BASE_URL || 'https://api.the-odds-api.com/v4';
+const ODDS_SPORT_KEY = process.env.ODDS_SPORT_KEY || 'soccer_uefa_champions_league';
+const ODDS_CACHE_TTL_MS = 10 * 60 * 1000;
+let oddsCache = { fetchedAt: 0, events: [] };
+
+const EXPECTED_COLUMNS = { Users: 12, Predictions: 9, Matches: 10, MatchEvents: 7 };
+
+// ========== Вспомогательные функции ==========
+function isNotEmpty(v) { return v !== null && v !== undefined && String(v).trim() !== ''; }
+function toNum(v, f = 0) { const n = Number(v); return Number.isFinite(n) ? n : f; }
+function toScore(v) { if (v === null || v === undefined || String(v).trim() === '') return null; const n = Number(v); return Number.isFinite(n) ? n : null; }
+function quoteSheetName(n) { return `'${String(n).replace(/'/g, "''")}'`; }
+function columnLetter(i) { let r = '', n = Math.max(1, Math.floor(i)); while (n > 0) { const m = (n - 1) % 26; r = String.fromCharCode(65 + m) + r; n = Math.floor((n - 1) / 26); } return r; }
+function padRow(row, len) { const l = Math.max(0, Number(len) || 0); return Array.from({ length: l }, (_, i) => row?.[i] ?? ''); }
+function isDataRow(row, header) { if (!Array.isArray(row) || !row.length) return false; const f = row[0]; if (!isNotEmpty(f)) return false; return header === undefined || String(f).trim() !== String(header).trim(); }
+function rangeForRow(sheet, idx, cols) { return `${quoteSheetName(sheet)}!A${idx + 1}:${columnLetter(cols)}${idx + 1}`; }
+function isDifferentRow(o, n, len) { for (let i = 0; i < len; i++) { if (String(o?.[i] ?? '').trim() !== String(n?.[i] ?? '').trim()) return true; } return false; }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ========== Google Sheets API ==========
+async function getSheetData(sheet, range) {
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${quoteSheetName(sheet)}!${range}` });
+  return res.data.values || [];
 }
-
-function closeModal() { document.querySelector('.modal-overlay')?.remove(); }
-function openModal(title, bodyHtml) {
-  closeModal();
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.innerHTML = `<div class="modal-card"><div class="modal-header"><h3>${escapeHtml(title)}</h3><button class="icon-button modal-close" aria-label="Закрыть">×</button></div><div class="modal-body">${bodyHtml}</div><button class="secondary-button modal-bottom-close">Закрыть</button></div>`;
-  document.body.appendChild(overlay);
-  overlay.addEventListener('click', e => { if (e.target === overlay) closeModal(); });
-  overlay.querySelector('.modal-close').onclick = closeModal;
-  overlay.querySelector('.modal-bottom-close').onclick = closeModal;
-  return overlay;
-}
-
-async function auth() {
-  if (!userId) { document.getElementById('app').innerHTML = '<div class="empty-state">Откройте приложение через Telegram.</div>'; return; }
-  try {
-    const data = await apiJson('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData }) });
-    if (data.userId) await loadMatches();
-  } catch (error) { document.getElementById('app').innerHTML = `<div class="empty-state error">${escapeHtml(error.message)}</div>`; }
-}
-
-function buildMatchCard(match, { finished = false } = {}) {
-  const card = document.createElement('div');
-  card.className = `match-card${finished ? ' finished-match' : ''}`;
-  const statusLabels = { scheduled: 'Предстоит', live: 'Идёт', finished: 'Завершён', postponed: 'Перенесён' };
-  const predictionText = match.user_prediction ? `<div class="prediction-line">Ваш прогноз: <strong>${match.user_prediction.home} - ${match.user_prediction.away}</strong></div>` : '';
-  const scoreText = match.status === 'finished' ? `<div class="score-line">Счёт: <strong>${match.home_score ?? '-'} - ${match.away_score ?? '-'}</strong></div>` : '';
-  const oddsBlock = !finished ? `<div class="odds-line hidden" data-odds-match="${escapeHtml(match.match_id)}"></div>` : '';
-  card.innerHTML = `<div class="match-card-main"><div class="match-title">${escapeHtml(match.home_team)} <span class="vs">vs</span> ${escapeHtml(match.away_team)} ${match.user_has_predicted ? '<span class="check-mark">✓</span>' : ''}</div>${oddsBlock}<div class="muted">${escapeHtml(match.stage || '')}</div><div class="muted">${escapeHtml(formatDateTime(match.kickoff_utc))}</div><div class="status status-${escapeHtml(match.status)}">${escapeHtml(statusLabels[match.status] || match.status || '')}</div>${scoreText}${predictionText}</div><div class="match-actions"></div>`;
-  const actions = card.querySelector('.match-actions');
-  if (match.status === 'scheduled') {
-    const predictButton = document.createElement('button');
-    predictButton.className = 'primary-button';
-    predictButton.textContent = match.user_has_predicted ? 'Изменить прогноз' : 'Сделать прогноз';
-    predictButton.onclick = () => showPredictionModal(match);
-    actions.appendChild(predictButton);
-  }
-  const allButton = document.createElement('button');
-  allButton.className = 'secondary-button';
-  allButton.textContent = 'Прогнозы';
-  allButton.onclick = () => showAllPredictions(match);
-  actions.appendChild(allButton);
-  return card;
-}
-
-async function loadOddsForMatches(matches) {
-  if (!matches.length) return;
-  await Promise.allSettled(matches.map(async match => {
-    const container = document.querySelector(`[data-odds-match="${match.match_id}"]`);
-    if (!container || !container.isConnected) return;
-    try {
-      const data = await apiJson(`/api/match-odds/${encodeURIComponent(match.match_id)}`);
-      if (data?.enabled && data?.odds) {
-        const formatOdd = v => Number(v || 0).toFixed(2);
-        container.classList.remove('hidden');
-        container.title = `Средние коэффициенты по ${data.odds.bookmakers} букмекерам`;
-        container.innerHTML = `<span class="odds-item">1 <strong>${formatOdd(data.odds.home)}</strong></span><span class="odds-item">X <strong>${formatOdd(data.odds.draw)}</strong></span><span class="odds-item">2 <strong>${formatOdd(data.odds.away)}</strong></span>`;
-      } else container.remove();
-    } catch { container.remove(); }
-  }));
-}
-
-function renderFinishedMatches(container, matches) {
-  container.innerHTML = '';
-  if (!matches.length) { container.innerHTML = '<div class="empty-state compact">Прошедших матчей пока нет.</div>'; return; }
-  const grouped = new Map();
-  [...matches].sort((a, b) => new Date(b.kickoff_utc) - new Date(a.kickoff_utc)).forEach(match => {
-    const key = getDayKey(match.kickoff_utc);
-    if (!grouped.has(key)) grouped.set(key, { label: formatDay(match.kickoff_utc), matches: [] });
-    grouped.get(key).matches.push(match);
+async function appendRows(sheet, rows) {
+  if (!rows.length) return;
+  const len = EXPECTED_COLUMNS[sheet] || Math.max(...rows.map(r => r.length));
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SHEET_ID, range: `${quoteSheetName(sheet)}!A:A`, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
+    resource: { values: rows.map(r => padRow(r, len)) },
   });
-  for (const group of grouped.values()) {
-    const daySection = document.createElement('section');
-    daySection.className = 'past-day';
-    daySection.innerHTML = `<h3>${escapeHtml(group.label)}</h3>`;
-    group.matches.forEach(match => daySection.appendChild(buildMatchCard(match, { finished: true })));
-    container.appendChild(daySection);
+}
+async function batchWriteRows(sheet, updates) {
+  if (!updates.length) return;
+  const len = EXPECTED_COLUMNS[sheet] || 26;
+  for (let i = 0; i < updates.length; i += 200) {
+    const chunk = updates.slice(i, i + 200).map(u => ({ range: rangeForRow(sheet, u.rowIndex, len), values: [padRow(u.values, len)] }));
+    await sheets.spreadsheets.values.batchUpdate({ spreadsheetId: SHEET_ID, requestBody: { valueInputOption: 'RAW', data: chunk } });
+  }
+}
+async function writeRow(sheet, idx, values) { await batchWriteRows(sheet, [{ rowIndex: idx, values }]); }
+const sheetIdCache = {};
+async function getSheetIdByName(name) {
+  if (sheetIdCache[name] !== undefined) return sheetIdCache[name];
+  const res = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID, fields: 'sheets.properties' });
+  const sheet = res.data.sheets?.find(s => s.properties?.title === name);
+  if (!sheet) throw new Error(`Sheet not found: ${name}`);
+  sheetIdCache[name] = sheet.properties.sheetId;
+  return sheetIdCache[name];
+}
+async function deleteRowsByRowIndices(sheet, indexes) {
+  const unique = [...new Set(indexes.map(Number).filter(Number.isFinite))].sort((a, b) => b - a);
+  if (!unique.length) return;
+  const sheetId = await getSheetIdByName(sheet);
+  for (let i = 0; i < unique.length; i += 200) {
+    const chunk = unique.slice(i, i + 200);
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SHEET_ID,
+      requestBody: { requests: chunk.map(idx => ({ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex: idx, endIndex: idx + 1 } } })) },
+    });
   }
 }
 
-async function loadMatches() {
-  const app = document.getElementById('app');
-  app.innerHTML = '<div class="loading">Загрузка матчей…</div>';
-  try {
-    const matches = await apiJson(`/api/matches?userId=${encodeURIComponent(userId)}&includeFinished=true`);
-    const activeMatches = matches.filter(m => m.status !== 'finished').sort((a, b) => new Date(a.kickoff_utc) - new Date(b.kickoff_utc));
-    const finishedMatches = matches.filter(m => m.status === 'finished');
-    app.innerHTML = `<div class="section-header"><h2>Матчи</h2><span class="badge">${activeMatches.length} актуальных</span></div><div id="active-matches"></div><button id="toggle-past-matches" class="past-toggle">${state.pastMatchesOpen ? 'Скрыть прошедшие матчи' : `Прошедшие матчи (${finishedMatches.length})`}</button><div id="past-matches" class="${state.pastMatchesOpen ? '' : 'hidden'}"></div>`;
-    const activeContainer = document.getElementById('active-matches');
-    if (!activeMatches.length) activeContainer.innerHTML = '<div class="empty-state">Нет предстоящих или текущих матчей.</div>';
-    else { activeMatches.forEach(match => activeContainer.appendChild(buildMatchCard(match))); loadOddsForMatches(activeMatches).catch(console.error); }
-    const pastContainer = document.getElementById('past-matches');
-    renderFinishedMatches(pastContainer, finishedMatches);
-    document.getElementById('toggle-past-matches').onclick = () => {
-      state.pastMatchesOpen = !state.pastMatchesOpen;
-      pastContainer.classList.toggle('hidden', !state.pastMatchesOpen);
-      document.getElementById('toggle-past-matches').textContent = state.pastMatchesOpen ? 'Скрыть прошедшие матчи' : `Прошедшие матчи (${finishedMatches.length})`;
-    };
-  } catch (error) { app.innerHTML = `<div class="empty-state error">Ошибка загрузки матчей: ${escapeHtml(error.message)}</div>`; }
+// ========== Логика последних прогнозов ==========
+function getLatestPredictionMap(data) {
+  const latest = new Map();
+  data.forEach((row, idx) => {
+    if (!isDataRow(row, 'prediction_id')) return;
+    const userId = String(row[1] || '').trim(), matchId = String(row[2] || '').trim();
+    if (!userId || !matchId) return;
+    const key = `${userId}|${matchId}`;
+    const ts = Date.parse(row[6] || '') || Date.parse(row[5] || '') || 0;
+    const cur = latest.get(key);
+    if (!cur || ts > cur.ts || (ts === cur.ts && idx > cur.idx)) latest.set(key, { idx, ts, userId, matchId });
+  });
+  return latest;
+}
+function getLatestPredictionsForUser(data, userId) {
+  const map = getLatestPredictionMap(data);
+  const uid = String(userId || '').trim();
+  const rows = [];
+  for (const item of map.values()) {
+    const row = data[item.idx];
+    if (row && String(row[1] || '').trim() === uid) rows.push(row);
+  }
+  return rows;
+}
+function filterPredictionResponseByType(list, type) {
+  const t = String(type || '').toLowerCase().trim();
+  if (!t || t === 'all') return list;
+  return list.filter(item => {
+    if (t === 'exact') return item.prediction_type === 'exact';
+    if (t === 'difference') return item.prediction_type === 'difference';
+    if (t === 'draw') return item.prediction_type === 'draw';
+    if (t === 'outcome') return item.prediction_type === 'outcome';
+    if (t === 'miss') return item.prediction_type === 'miss' || (item.status === 'finished' && item.points === 0);
+    if (t === 'successful' || t === 'points') return item.points > 0;
+    if (t === 'finished') return item.status === 'finished';
+    if (t === 'scheduled') return item.status === 'scheduled';
+    if (t === 'live') return item.status === 'live';
+    return true;
+  });
+}
+function sortPredictionsResponse(list, sortMode) {
+  const byDateAsc = (a, b) => (new Date(a.kickoff_utc).getTime() || Infinity) - (new Date(b.kickoff_utc).getTime() || Infinity);
+  const s = String(sortMode || '').toLowerCase().trim();
+  if (s === 'exact_first') return [...list].sort((a, b) => (b.prediction_type === 'exact' ? 1 : 0) - (a.prediction_type === 'exact' ? 1 : 0) || byDateAsc(a, b));
+  if (s === 'points_desc') return [...list].sort((a, b) => b.points - a.points || byDateAsc(a, b));
+  if (s === 'date_desc') return [...list].sort((a, b) => (new Date(b.kickoff_utc).getTime() || -Infinity) - (new Date(a.kickoff_utc).getTime() || -Infinity));
+  return [...list].sort(byDateAsc);
 }
 
-function showPredictionModal(match) {
-  const currentHome = match.user_prediction?.home ?? 0, currentAway = match.user_prediction?.away ?? 0;
-  const overlay = openModal('Прогноз на матч', `<div class="modal-match-name">${escapeHtml(match.home_team)} vs ${escapeHtml(match.away_team)}</div><div class="score-inputs"><label><span>${escapeHtml(match.home_team)}</span><input type="number" id="homeGoals" min="0" max="20" value="${currentHome}"></label><span class="score-separator">:</span><label><span>${escapeHtml(match.away_team)}</span><input type="number" id="awayGoals" min="0" max="20" value="${currentAway}"></label></div><button id="save-prediction" class="primary-button full-width">Сохранить</button>`);
-  overlay.querySelector('#save-prediction').onclick = () => submitPrediction(match.match_id);
+// ========== Авторизация ==========
+function getAdminIds() { return String(process.env.ADMIN_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean); }
+function verifyTelegramInitData(str) {
+  try {
+    if (!BOT_TOKEN || !str) return false;
+    const p = new URLSearchParams(str);
+    const hash = p.get('hash');
+    if (!hash) return false;
+    p.delete('hash');
+    const dcs = [...p.entries()].map(([k, v]) => `${k}=${v}`).sort().join('\n');
+    const secret = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
+    const calc = crypto.createHmac('sha256', secret).update(dcs).digest('hex');
+    const cb = Buffer.from(calc, 'hex'), hb = Buffer.from(hash, 'hex');
+    if (!cb.length || hb.length !== cb.length) return false;
+    if (!crypto.timingSafeEqual(cb, hb)) return false;
+    const authDate = Number(p.get('auth_date') || 0);
+    if (authDate && Date.now() / 1000 - authDate > 86400) return false;
+    return true;
+  } catch { return false; }
+}
+function extractAuthenticatedUser(req) {
+  const initData = req.body?.initData || req.query?.initData;
+  if (initData) {
+    if (BOT_TOKEN && !verifyTelegramInitData(initData)) return null;
+    try {
+      const p = new URLSearchParams(initData);
+      const user = JSON.parse(p.get('user') || 'null');
+      if (user?.id) return { ...user, id: String(user.id).trim() };
+    } catch { return null; }
+  }
+  if (ALLOW_PLAIN_USER_ID) {
+    const uid = req.body?.userId || req.query?.userId;
+    if (isNotEmpty(uid)) return { id: String(uid).trim(), username: req.body?.username || '', first_name: req.body?.firstName || '', last_name: req.body?.lastName || '' };
+  }
+  return null;
+}
+function extractUserId(req) { return extractAuthenticatedUser(req)?.id ?? null; }
+function requireAdmin(req, res, next) {
+  const key = req.headers['x-admin-api-key'] || req.body?.apiKey;
+  if (ADMIN_API_KEY && key === ADMIN_API_KEY) return next();
+  const user = extractAuthenticatedUser(req);
+  if (user?.id && getAdminIds().includes(String(user.id).trim())) return next();
+  return res.status(403).json({ error: 'Forbidden' });
+}
+const asyncHandler = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+// ========== Команды и переводы ==========
+const teamTranslations = { 'Real Madrid CF': 'Реал Мадрид', 'FC Barcelona': 'Барселона', 'Manchester City FC': 'Манчестер Сити', 'Liverpool FC': 'Ливерпуль', 'FC Bayern München': 'Бавария', 'Paris Saint-Germain FC': 'ПСЖ', 'Juventus FC': 'Ювентус', 'AC Milan': 'Милан', 'Chelsea FC': 'Челси', 'Arsenal FC': 'Арсенал', 'Borussia Dortmund': 'Боруссия Дортмунд', 'Club Atlético de Madrid': 'Атлетико Мадрид', 'FC Internazionale Milano': 'Интер', 'SSC Napoli': 'Наполи', 'FC Porto': 'Порту', 'SL Benfica': 'Бенфика', 'AFC Ajax': 'Аякс', 'Olympique Lyonnais': 'Лион', 'AS Monaco FC': 'Монако', 'FC Red Bull Salzburg': 'Зальцбург', 'FK Shakhtar Donetsk': 'Шахтер', 'GNK Dinamo Zagreb': 'Динамо Загреб', 'Celtic FC': 'Селтик', 'Rangers FC': 'Рейнджерс', 'Club Brugge KV': 'Брюгге', 'Galatasaray SK': 'Галатасарай', 'Fenerbahçe SK': 'Фенербахче', 'Olympiacos FC': 'Олимпиакос', 'AEK Athens FC': 'АЕК', 'Maccabi Haifa FC': 'Маккаби Хайфа', 'FC København': 'Копенгаген', 'BSC Young Boys': 'Янг Бойз', 'FK Crvena Zvezda': 'Црвена Звезда', 'Racing Club de Lens': 'Ланс', 'Real Sociedad de Fútbol': 'Реал Сосьедад', 'PSV': 'ПСВ', 'Feyenoord Rotterdam': 'Фейеноорд', 'Sporting CP': 'Спортинг', 'Sporting Clube de Portugal': 'Спортинг', 'FC Viktoria Plzeň': 'Виктория Пльзень', 'Stade Brestois 29': 'Брест', 'VfB Stuttgart': 'Штутгарт', 'Aston Villa FC': 'Астон Вилла', 'Bologna FC 1909': 'Болонья', 'Girona FC': 'Жирона', 'RC Celta de Vigo': 'Сельта', 'Real Betis Balompié': 'Бетис', 'Sevilla FC': 'Севилья', 'Valencia CF': 'Валенсия', 'Lazio Roma': 'Лацио', 'Atalanta BC': 'Аталанта', 'AS Roma': 'Рома', 'Olympique de Marseille': 'Марсель', 'Lille OSC': 'Лилль', 'OGC Nice': 'Ницца', 'Stade Rennais FC': 'Ренн', 'RC Strasbourg Alsace': 'Страсбур', 'FC Nantes': 'Нант', 'SC Braga': 'Брага', 'RSC Anderlecht': 'Андерлехт', 'KRC Genk': 'Генк', 'Ferencvárosi TC': 'Ференцварош', 'Ludogorets Razgrad': 'Лудогорец', 'Qarabağ FK': 'Карабах', 'Sparta Praha': 'Спарта Прага', 'Slavia Praha': 'Славия Прага', 'SK Slavia Praha': 'Славия Прага', 'FC Basel 1893': 'Базель', 'Grasshopper Club Zürich': 'Грассхоппер', 'Manchester United FC': 'Манчестер Юнайтед', 'Villarreal CF': 'Вильярреал', 'PAE AEK': 'АЕК', 'LASK Linz': 'ЛАСК', 'Viking FK': 'Викинг', 'ŠK Slovan Bratislava': 'Слован Братислава', 'FK Bodø/Glimt': 'Будё-Глимт', 'Como 1907': 'Комо', 'RB Leipzig': 'РБ Лейпциг', 'Sabah FK': 'Сабах' };
+const teamSynonyms = { 'мс': 'Манчестер Сити', 'ман сити': 'Манчестер Сити', 'мю': 'Манчестер Юнайтед', 'ман юнайтед': 'Манчестер Юнайтед', 'манчестер юнайтед': 'Манчестер Юнайтед', 'реал': 'Реал Мадрид', 'реал мадрид': 'Реал Мадрид', 'барса': 'Барселона', 'барселона': 'Барселона', 'бавария': 'Бавария', 'бавария мюнхен': 'Бавария', 'дортмунд': 'Боруссия Дортмунд', 'боруссия д': 'Боруссия Дортмунд', 'боруссия дортмунд': 'Боруссия Дортмунд', 'атлетико': 'Атлетико Мадрид', 'атлетико мадрид': 'Атлетико Мадрид', 'интер': 'Интер', 'наполи': 'Наполи', 'псж': 'ПСЖ', 'пари сен-жермен': 'ПСЖ', 'париж': 'ПСЖ', 'ливерпуль': 'Ливерпуль', 'челси': 'Челси', 'арсенал': 'Арсенал', 'ювентус': 'Ювентус', 'милан': 'Милан', 'аякс': 'Аякс', 'порту': 'Порту', 'бенфика': 'Бенфика', 'лион': 'Лион', 'монако': 'Монако', 'зальцбург': 'Зальцбург', 'шахтер': 'Шахтер', 'динамо загреб': 'Динамо Загреб', 'селтик': 'Селтик', 'рейнджерс': 'Рейнджерс', 'брюгге': 'Брюгге', 'галатасарай': 'Галатасарай', 'фенербахче': 'Фенербахче', 'олимпиакос': 'Олимпиакос', 'аек': 'АЕК', 'маккаби хайфа': 'Маккаби Хайфа', 'копенгаген': 'Копенгаген', 'янг бойз': 'Янг Бойз', 'црвена звезда': 'Црвена Звезда', 'ланс': 'Ланс', 'реал сосьедад': 'Реал Сосьедад', 'псв': 'ПСВ', 'фейеноорд': 'Фейеноорд', 'спортинг': 'Спортинг', 'спортинг лиссабон': 'Спортинг', 'виктория пльзень': 'Виктория Пльзень', 'брест': 'Брест', 'штутгарт': 'Штутгарт', 'астон вилла': 'Астон Вилла', 'болонья': 'Болонья', 'жирона': 'Жирона', 'сельта': 'Сельта', 'бетис': 'Бетис', 'севилья': 'Севилья', 'валенсия': 'Валенсия', 'лацио': 'Лацио', 'аталанта': 'Аталанта', 'рома': 'Рома', 'марсель': 'Марсель', 'лилль': 'Лилль', 'ницца': 'Ницца', 'ренн': 'Ренн', 'страсбур': 'Страсбур', 'нант': 'Нант', 'брага': 'Брага', 'андерлехт': 'Андерлехт', 'генк': 'Генк', 'ференцварош': 'Ференцварош', 'лудогорец': 'Лудогорец', 'карабах': 'Карабах', 'спарта прага': 'Спарта Прага', 'славия прага': 'Славия Прага', 'базель': 'Базель', 'грассхоппер': 'Грассхоппер', 'вильярреал': 'Вильярреал', 'ласк': 'ЛАСК', 'викинг': 'Викинг', 'слован братислава': 'Слован Братислава', 'будё-глимт': 'Будё-Глимт', 'комо': 'Комо', 'рб лейпциг': 'РБ Лейпциг', 'сабах': 'Сабах' };
+const teamAliases = new Map();
+Object.entries(teamTranslations).forEach(([api, ru]) => { teamAliases.set(api.toLowerCase().trim(), ru); teamAliases.set(ru.toLowerCase().trim(), ru); });
+Object.entries(teamSynonyms).forEach(([alias, ru]) => teamAliases.set(alias.toLowerCase().trim(), ru));
+function translateTeam(name) { return name ? (teamTranslations[name] || name) : ''; }
+function normalizeTeamName(name) {
+  const lower = String(name || '').toLowerCase().trim();
+  if (teamAliases.has(lower)) return teamAliases.get(lower);
+  const cleaned = lower.replace(/[«»"'()]/g, '').replace(/\s+/g, ' ').trim();
+  return teamAliases.has(cleaned) ? teamAliases.get(cleaned) : String(name || '').trim();
 }
 
-async function submitPrediction(matchId) {
-  const homeGoals = document.getElementById('homeGoals').value, awayGoals = document.getElementById('awayGoals').value;
-  try {
-    const data = await apiJson('/api/predictions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData, matchId, predictedHome: homeGoals, predictedAway: awayGoals }) });
-    if (data.success) { closeModal(); tg.HapticFeedback?.notificationOccurred?.('success'); await loadMatches(); }
-  } catch (error) { alert(error.message || 'Ошибка сохранения прогноза'); }
+// ========== Odds API helpers ==========
+const ruToApiTeam = new Map();
+const apiTeamLowerMap = new Map();
+Object.entries(teamTranslations).forEach(([api, ru]) => { ruToApiTeam.set(ru.toLowerCase().trim(), api); apiTeamLowerMap.set(api.toLowerCase().trim(), api); });
+const oddsTeamAliases = { 'bayern munich': 'FC Bayern München', 'bayern': 'FC Bayern München', 'psg': 'Paris Saint-Germain FC', 'paris saint germain': 'Paris Saint-Germain FC', 'paris sg': 'Paris Saint-Germain FC', 'man city': 'Manchester City FC', 'manchester city': 'Manchester City FC', 'man united': 'Manchester United FC', 'manchester united': 'Manchester United FC', 'inter': 'FC Internazionale Milano', 'inter milan': 'FC Internazionale Milano', 'juventus': 'Juventus FC', 'milan': 'AC Milan', 'borussia dortmund': 'Borussia Dortmund', 'dortmund': 'Borussia Dortmund', 'atletico madrid': 'Club Atlético de Madrid', 'atletico': 'Club Atlético de Madrid', 'napoli': 'SSC Napoli', 'porto': 'FC Porto', 'benfica': 'SL Benfica', 'ajax': 'AFC Ajax', 'lyon': 'Olympique Lyonnais', 'monaco': 'AS Monaco FC', 'salzburg': 'FC Red Bull Salzburg', 'rb salzburg': 'FC Red Bull Salzburg', 'shakhtar': 'FK Shakhtar Donetsk', 'shakhtar donetsk': 'FK Shakhtar Donetsk', 'dinamo zagreb': 'GNK Dinamo Zagreb', 'celtic': 'Celtic FC', 'rangers': 'Rangers FC', 'club brugge': 'Club Brugge KV', 'brugge': 'Club Brugge KV', 'galatasaray': 'Galatasaray SK', 'fenerbahce': 'Fenerbahçe SK', 'olympiacos': 'Olympiacos FC', 'aek athens': 'AEK Athens FC', 'maccabi haifa': 'Maccabi Haifa FC', 'copenhagen': 'FC København', 'young boys': 'BSC Young Boys', 'crvena zvezda': 'FK Crvena Zvezda', 'red star belgrade': 'FK Crvena Zvezda', 'lens': 'Racing Club de Lens', 'real sociedad': 'Real Sociedad de Fútbol', 'psv eindhoven': 'PSV', 'feyenoord': 'Feyenoord Rotterdam', 'sporting lisbon': 'Sporting CP', 'viktoria plzen': 'FC Viktoria Plzeň', 'brest': 'Stade Brestois 29', 'stuttgart': 'VfB Stuttgart', 'aston villa': 'Aston Villa FC', 'bologna': 'Bologna FC 1909', 'girona': 'Girona FC', 'celta': 'RC Celta de Vigo', 'celta vigo': 'RC Celta de Vigo', 'real betis': 'Real Betis Balompié', 'betis': 'Real Betis Balompié', 'sevilla': 'Sevilla FC', 'valencia': 'Valencia CF', 'lazio': 'Lazio Roma', 'atalanta': 'Atalanta BC', 'roma': 'AS Roma', 'marseille': 'Olympique de Marseille', 'lille': 'Lille OSC', 'nice': 'OGC Nice', 'rennes': 'Stade Rennais FC', 'strasbourg': 'RC Strasbourg Alsace', 'nantes': 'FC Nantes', 'braga': 'SC Braga', 'anderlecht': 'RSC Anderlecht', 'genk': 'KRC Genk', 'ferencvaros': 'Ferencvárosi TC', 'ludogorets': 'Ludogorets Razgrad', 'qarabag': 'Qarabağ FK', 'sparta prague': 'Sparta Praha', 'slavia prague': 'Slavia Praha', 'basel': 'FC Basel 1893', 'grasshoppers': 'Grasshopper Club Zürich', 'villarreal': 'Villarreal CF', 'aek': 'PAE AEK', 'lask': 'LASK Linz', 'viking': 'Viking FK', 'slovan bratislava': 'ŠK Slovan Bratislava', 'bodo/glimt': 'FK Bodø/Glimt', 'bodoe/glimt': 'FK Bodø/Glimt', 'como': 'Como 1907', 'rb leipzig': 'RB Leipzig', 'leipzig': 'RB Leipzig', 'sabah': 'Sabah FK', 'real madrid': 'Real Madrid CF', 'barcelona': 'FC Barcelona', 'liverpool': 'Liverpool FC', 'chelsea': 'Chelsea FC', 'arsenal': 'Arsenal FC' };
+function storedTeamToApiTeam(storedTeam) { const lower = String(storedTeam || '').toLowerCase().trim(); if (!lower) return ''; return ruToApiTeam.get(lower) || apiTeamLowerMap.get(lower) || String(storedTeam || '').trim(); }
+function findOurApiTeamName(oddsTeam) { const raw = String(oddsTeam || '').toLowerCase().trim(); if (!raw) return null; if (oddsTeamAliases[raw]) return oddsTeamAliases[raw]; const exact = apiTeamLowerMap.get(raw); if (exact) return exact; for (const [lower, apiName] of apiTeamLowerMap.entries()) { if (lower.includes(raw) || raw.includes(lower)) return apiName; } return null; }
+async function fetchOddsEvents() {
+  if (!ODDS_API_KEY) return [];
+  const now = Date.now();
+  if (now - oddsCache.fetchedAt < ODDS_CACHE_TTL_MS) return oddsCache.events;
+  const sportKeys = [...new Set([ODDS_SPORT_KEY, 'upcoming'].filter(Boolean))];
+  for (const sportKey of sportKeys) {
+    try {
+      const url = `${ODDS_API_BASE_URL}/sports/${encodeURIComponent(sportKey)}/odds/?apiKey=${encodeURIComponent(ODDS_API_KEY)}&regions=eu&markets=h2h&oddsFormat=decimal&dateFormat=iso`;
+      const response = await fetch(url);
+      if (!response.ok) continue;
+      const data = await response.json();
+      if (Array.isArray(data) && data.length > 0) { oddsCache = { fetchedAt: now, events: data }; return data; }
+    } catch (error) { console.error('Ошибка загрузки коэффициентов:', error.message); }
+  }
+  oddsCache = { fetchedAt: now, events: [] };
+  return [];
+}
+function getOddsFromEvent(event) {
+  const rows = [];
+  (event.bookmakers || []).forEach(bookmaker => {
+    const market = (bookmaker.markets || []).find(item => String(item.key || '').toLowerCase() === 'h2h');
+    if (!market) return;
+    const outcomes = market.outcomes || [];
+    const home = outcomes.find(outcome => outcome.name === event.home_team);
+    const away = outcomes.find(outcome => outcome.name === event.away_team);
+    const draw = outcomes.find(outcome => String(outcome.name || '').toLowerCase() === 'draw');
+    if (home?.price && away?.price && draw?.price) rows.push({ home: Number(home.price), draw: Number(draw.price), away: Number(away.price) });
+  });
+  if (!rows.length) return null;
+  const average = key => { const values = rows.map(row => row[key]).filter(Number.isFinite); if (!values.length) return null; return Math.round((values.reduce((a, v) => a + v, 0) / values.length) * 100) / 100; };
+  const home = average('home'), draw = average('draw'), away = average('away');
+  if (home === null || draw === null || away === null) return null;
+  return { home, draw, away, bookmakers: rows.length };
 }
 
-async function showAllPredictions(match) {
-  try {
-    const [preds, events] = await Promise.all([apiJson(`/api/match-predictions/${encodeURIComponent(match.match_id)}`), (match.status === 'finished' || match.status === 'live') ? apiJson(`/api/match-events/${encodeURIComponent(match.match_id)}`).catch(() => []) : Promise.resolve([])]);
-    let predictionsHtml = '<div class="responsive-table"><table><thead><tr><th>Участник</th><th>Прогноз</th><th>Очки</th></tr></thead><tbody>';
-    if (!preds.length) predictionsHtml += '<tr><td colspan="3">Прогнозов пока нет.</td></tr>';
-    else preds.forEach(p => { predictionsHtml += `<tr><td>${escapeHtml(p.displayName)}</td><td>${p.predictedHome} - ${p.predictedAway}</td><td>${p.points ?? 0}</td></tr>`; });
-    predictionsHtml += '</tbody></table></div>';
-    let eventsHtml = '';
-    if (events.length) {
-      eventsHtml = '<div class="events-block"><h4>Голы</h4><ul>';
-      events.forEach(e => { const m = e.addedTime > 0 ? `${e.minute}+${e.addedTime}` : e.minute; eventsHtml += `<li>${escapeHtml(m)}' — ${escapeHtml(e.team)}: ${escapeHtml(e.player || '')}${e.scoreAfterEvent ? ` (${escapeHtml(e.scoreAfterEvent)})` : ''}</li>`; });
-      eventsHtml += '</ul></div>';
+// ========== Football-Data.org ==========
+function mapStage(apiStage) { const stages = { PRELIMINARY: 'Предварительный раунд', FIRST_QUALIFYING_ROUND: '1-й квал. раунд', SECOND_QUALIFYING_ROUND: '2-й квал. раунд', THIRD_QUALIFYING_ROUND: '3-й квал. раунд', PLAY_OFF_ROUND: 'Раунд плей-офф', GROUP_STAGE: 'Групповой этап', ROUND_OF_16: '1/8 финала', QUARTER_FINALS: '1/4 финала', SEMI_FINALS: 'Полуфинал', FINAL: 'Финал' }; return stages[apiStage] || apiStage; }
+function mapStatus(apiStatus) { if (apiStatus === 'SCHEDULED' || apiStatus === 'TIMED') return 'scheduled'; if (apiStatus === 'LIVE' || apiStatus === 'IN_PLAY' || apiStatus === 'PAUSED') return 'live'; if (apiStatus === 'FINISHED') return 'finished'; if (apiStatus === 'POSTPONED') return 'postponed'; if (apiStatus === 'SUSPENDED' || apiStatus === 'CANCELLED') return apiStatus.toLowerCase(); return String(apiStatus || '').toLowerCase(); }
+async function fetchFootball(path) {
+  if (!FOOTBALL_DATA_API_KEY) throw new Error('FOOTBALL_DATA_API_KEY не задан');
+  const res = await fetch(`${FOOTBALL_DATA_BASE_URL}${path}`, { headers: { 'X-Auth-Token': FOOTBALL_DATA_API_KEY } });
+  if (!res.ok) { const text = await res.text(); const err = new Error(`Football-Data.org API error: ${res.status} ${text}`); err.status = res.status; throw err; }
+  return res.json();
+}
+function calculatePoints(ph, pa, ah, aa) {
+  ph = toScore(ph); pa = toScore(pa); ah = toScore(ah); aa = toScore(aa);
+  if (ph === null || pa === null || ah === null || aa === null) return { points: 0, type: 'miss' };
+  if (ph === ah && pa === aa) return { points: 5, type: 'exact' };
+  if (ph === pa && ah === aa) return { points: 3, type: 'draw' };
+  if (ph - pa === ah - aa) return { points: 3, type: 'difference' };
+  if ((ph > pa && ah > aa) || (ph < pa && ah < aa)) return { points: 1, type: 'outcome' };
+  return { points: 0, type: 'miss' };
+}
+function emptyUserDelta() { return { points: 0, successful: 0, exact: 0, difference: 0, draws: 0, outcomes: 0, misses: 0 }; }
+function addResultToDelta(delta, result, sign) {
+  if (!delta || !result) return;
+  const pts = toNum(result.points, 0);
+  delta.points += sign * pts;
+  if (pts > 0) delta.successful += sign;
+  if (result.type === 'exact') delta.exact += sign;
+  if (result.type === 'difference') delta.difference += sign;
+  if (result.type === 'draw') delta.draws += sign;
+  if (result.type === 'outcome') delta.outcomes += sign;
+  if (result.type === 'miss') delta.misses += sign;
+}
+
+async function recalculatePointsForMatch(matchId, homeScore, awayScore) {
+  const ah = toScore(homeScore), aa = toScore(awayScore);
+  if (ah === null || aa === null) return 0;
+  const matchIdStr = String(matchId).trim();
+  const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const latestMap = getLatestPredictionMap(predictionsData);
+  const predictionUpdates = [];
+  const userDeltas = new Map();
+  predictionsData.forEach((row, rowIndex) => {
+    if (!isDataRow(row, 'prediction_id')) return;
+    const pMatchId = String(row[2] || '').trim();
+    if (pMatchId !== matchIdStr) return;
+    const userId = String(row[1] || '').trim();
+    if (!userId) return;
+    const key = `${userId}|${pMatchId}`;
+    const latest = latestMap.get(key);
+    if (!latest) return;
+    const oldPoints = toNum(row[7], 0), oldType = String(row[8] || '').trim();
+    const ensureDelta = () => { if (!userDeltas.has(userId)) userDeltas.set(userId, emptyUserDelta()); return userDeltas.get(userId); };
+    if (rowIndex !== latest.idx) {
+      if (oldPoints !== 0 || oldType !== 'duplicate') {
+        const upd = padRow(row, EXPECTED_COLUMNS.Predictions);
+        upd[7] = 0; upd[8] = 'duplicate';
+        predictionUpdates.push({ rowIndex, values: upd });
+        addResultToDelta(ensureDelta(), { points: oldPoints, type: oldType }, -1);
+      }
+      return;
     }
-    const scoreText = match.status === 'finished' ? ` · ${match.home_score ?? '-'}:${match.away_score ?? '-'}` : '';
-    openModal(`${match.home_team} — ${match.away_team}${scoreText}`, predictionsHtml + eventsHtml);
-  } catch (error) { alert(`Ошибка загрузки прогнозов: ${error.message}`); }
-}
-
-function predictionCardHtml(p) {
-  const finished = p.status === 'finished', type = typeLabel(p.prediction_type);
-  return `<div class="prediction-item ${p.prediction_type === 'exact' ? 'prediction-exact' : ''}"><div class="prediction-item-title">${escapeHtml(p.home_team)} vs ${escapeHtml(p.away_team)}</div><div class="muted">${escapeHtml(formatDateTime(p.kickoff_utc))}</div><div>Прогноз: <strong>${p.predicted_home ?? '-'} - ${p.predicted_away ?? '-'}</strong></div>${finished ? `<div>Счёт: <strong>${p.home_score ?? '-'} - ${p.away_score ?? '-'}</strong></div>` : ''}${finished ? `<div class="result-line">${type ? `${escapeHtml(type)} ·` : ''}<strong>${p.points} очк.</strong></div>` : '<div class="muted">Матч ещё не завершён</div>'}</div>`;
-}
-
-async function loadMyPredictions(filter = state.myPredictionFilter) {
-  state.myPredictionFilter = filter;
-  const app = document.getElementById('app');
-  app.innerHTML = '<div class="loading">Загрузка прогнозов…</div>';
-  try {
-    const params = new URLSearchParams({ userId: String(userId), sort: filter === 'exact_first' ? 'exact_first' : 'date_desc' });
-    if (!['all', 'exact_first'].includes(filter)) params.set('type', filter);
-    const predictions = await apiJson(`/api/my-predictions?${params.toString()}`);
-    app.innerHTML = `<div class="section-header"><h2>Мои прогнозы</h2><span class="badge">${predictions.length}</span></div><div class="filter-bar" id="my-prediction-filters"><button data-filter="all" class="${filter === 'all' ? 'active' : ''}">Все</button><button data-filter="exact_first" class="${filter === 'exact_first' ? 'active' : ''}">ТС первыми</button><button data-filter="exact" class="${filter === 'exact' ? 'active' : ''}">Только ТС</button><button data-filter="successful" class="${filter === 'successful' ? 'active' : ''}">С очками</button><button data-filter="miss" class="${filter === 'miss' ? 'active' : ''}">Промахи</button></div><div id="my-predictions-list"></div>`;
-    document.querySelectorAll('#my-prediction-filters button').forEach(b => { b.onclick = () => loadMyPredictions(b.dataset.filter); });
-    const list = document.getElementById('my-predictions-list');
-    if (!predictions.length) { list.innerHTML = filter === 'exact' ? '<div class="empty-state">Пока нет матчей с полностью угаданным счётом.</div>' : '<div class="empty-state">По выбранному фильтру прогнозов нет.</div>'; return; }
-    predictions.forEach(p => list.insertAdjacentHTML('beforeend', predictionCardHtml(p)));
-  } catch (error) { app.innerHTML = `<div class="empty-state error">Ошибка загрузки прогнозов: ${escapeHtml(error.message)}</div>`; }
-}
-
-function nextStandingsSort(sortBy) {
-  const current = state.standingsSort;
-  if (current.sortBy !== sortBy) return { sortBy, order: sortBy === 'misses' ? 'asc' : 'desc' };
-  return { sortBy, order: current.order === 'asc' ? 'desc' : 'asc' };
-}
-function sortArrow(sortBy) { if (state.standingsSort.sortBy !== sortBy) return ''; return state.standingsSort.order === 'asc' ? ' ↑' : ' ↓'; }
-
-async function loadStandings(sortBy = state.standingsSort.sortBy, order = state.standingsSort.order) {
-  state.standingsSort = { sortBy, order };
-  const app = document.getElementById('app');
-  app.innerHTML = '<div class="loading">Расчёт таблицы…</div>';
-  try {
-    const params = new URLSearchParams();
-    if (sortBy) params.set('sortBy', sortBy);
-    if (order) params.set('order', order);
-    const url = params.toString() ? `/api/standings?${params.toString()}` : '/api/standings';
-    const [table, historyData] = await Promise.all([apiJson(url), apiJson('/api/standings-history').catch(() => ({ previousPositions: {}, currentPositions: {} }))]);
-    const { previousPositions, currentPositions } = historyData;
-    app.innerHTML = `<div class="section-header"><h2>Турнирная таблица</h2><span class="badge">${table.length} участников</span></div><div class="standings-hint">Нажимай на имя — все прогнозы участника. На цифру в колонке — матчи соответствующей категории.</div><div class="filter-bar standings-sort-bar"><button data-sort="" class="${!sortBy ? 'active' : ''}">Комплексно</button><button data-sort="points" class="${sortBy === 'points' ? 'active' : ''}">Очки</button><button data-sort="exact" class="${sortBy === 'exact' ? 'active' : ''}">Точные</button><button data-sort="difference" class="${sortBy === 'difference' ? 'active' : ''}">Разницы</button><button data-sort="draws" class="${sortBy === 'draws' ? 'active' : ''}">Ничьи</button><button data-sort="outcomes" class="${sortBy === 'outcomes' ? 'active' : ''}">Исходы</button><button data-sort="misses" class="${sortBy === 'misses' ? 'active' : ''}">Промахи</button><button id="show-last-round" class="secondary-button" style="margin-left: auto;">🏆 Тур</button></div><div class="responsive-table standings-table-wrap"><table class="standings-table"><thead><tr><th>#</th><th>Участник</th><th><button class="table-sort" data-sort="points">Очки${sortArrow('points')}</button></th><th><button class="table-sort" data-sort="successful">Угадано${sortArrow('successful')}</button></th><th><button class="table-sort" data-sort="exact">Точные${sortArrow('exact')}</button></th><th><button class="table-sort" data-sort="difference">Разницы${sortArrow('difference')}</button></th><th><button class="table-sort" data-sort="draws">Ничьи${sortArrow('draws')}</button></th><th><button class="table-sort" data-sort="outcomes">Исходы${sortArrow('outcomes')}</button></th><th><button class="table-sort" data-sort="misses">Промахи${sortArrow('misses')}</button></th></tr></thead><tbody id="standings-body"></tbody></table></div>`;
-    // FIX: сначала вешаем обработчик на "🏆 Тур"
-    document.getElementById('show-last-round').onclick = showLastRoundStandings;
-    const body = document.getElementById('standings-body');
-    if (!table.length) body.innerHTML = '<tr><td colspan="9">Нет участников.</td></tr>';
-    else {
-      table.forEach(row => {
-        const prevPos = previousPositions[row.userId], currPos = currentPositions[row.userId] || row.position;
-        let arrow = '';
-        if (prevPos && currPos) { const diff = prevPos - currPos; if (diff > 0) arrow = `<span class="position-arrow up" title="Поднялся на ${diff}">▲${diff}</span>`; else if (diff < 0) arrow = `<span class="position-arrow down" title="Опустился на ${Math.abs(diff)}">▼${Math.abs(diff)}</span>`; }
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${row.position} ${arrow}</td><td><button class="link-button participant-link">${escapeHtml(row.displayName)}</button></td><td><button class="metric-button metric-points">${row.totalPoints}</button></td><td><button class="metric-button metric-successful">${row.successfulPredictions}</button></td><td><button class="metric-button metric-exact">${row.exactScores}</button></td><td><button class="metric-button metric-difference">${row.goalDifference}</button></td><td><button class="metric-button metric-draw">${row.draws}</button></td><td><button class="metric-button metric-outcome">${row.outcomes}</button></td><td><button class="metric-button metric-miss">${row.misses}</button></td>`;
-        tr.querySelector('.participant-link').onclick = () => showParticipantPredictions(row.userId, row.displayName, 'all');
-        tr.querySelector('.metric-points').onclick = () => showParticipantPredictions(row.userId, row.displayName, 'successful');
-        tr.querySelector('.metric-successful').onclick = () => showParticipantPredictions(row.userId, row.displayName, 'successful');
-        tr.querySelector('.metric-exact').onclick = () => showParticipantPredictions(row.userId, row.displayName, 'exact');
-        tr.querySelector('.metric-difference').onclick = () => showParticipantPredictions(row.userId, row.displayName, 'difference');
-        tr.querySelector('.metric-draw').onclick = () => showParticipantPredictions(row.userId, row.displayName, 'draw');
-        tr.querySelector('.metric-outcome').onclick = () => showParticipantPredictions(row.userId, row.displayName, 'outcome');
-        tr.querySelector('.metric-miss').onclick = () => showParticipantPredictions(row.userId, row.displayName, 'miss');
-        body.appendChild(tr);
-      });
+    const newResult = calculatePoints(row[3], row[4], ah, aa);
+    if (oldPoints === newResult.points && oldType === newResult.type) return;
+    const upd = padRow(row, EXPECTED_COLUMNS.Predictions);
+    upd[6] = new Date().toISOString(); upd[7] = newResult.points; upd[8] = newResult.type;
+    predictionUpdates.push({ rowIndex, values: upd });
+    const delta = ensureDelta();
+    addResultToDelta(delta, { points: oldPoints, type: oldType }, -1);
+    addResultToDelta(delta, newResult, 1);
+  });
+  await batchWriteRows('Predictions', predictionUpdates);
+  if (userDeltas.size > 0) {
+    const usersData = await getSheetData('Users', 'A:Z');
+    const userUpdates = [];
+    for (const [userId, delta] of userDeltas.entries()) {
+      const rowIndex = usersData.findIndex(r => isDataRow(r, 'user_id') && String(r[0]).trim() === userId);
+      if (rowIndex === -1) continue;
+      const user = padRow(usersData[rowIndex], EXPECTED_COLUMNS.Users);
+      user[4] = Math.max(0, toNum(user[4], 0) + delta.points);
+      user[6] = Math.max(0, toNum(user[6], 0) + delta.successful);
+      user[7] = Math.max(0, toNum(user[7], 0) + delta.exact);
+      user[8] = Math.max(0, toNum(user[8], 0) + delta.difference);
+      user[9] = Math.max(0, toNum(user[9], 0) + delta.draws);
+      user[10] = Math.max(0, toNum(user[10], 0) + delta.outcomes);
+      user[11] = Math.max(0, toNum(user[11], 0) + delta.misses);
+      userUpdates.push({ rowIndex, values: user });
     }
-    document.querySelectorAll('.table-sort').forEach(b => { b.onclick = () => { const n = nextStandingsSort(b.dataset.sort); loadStandings(n.sortBy, n.order); }; });
-    // FIX: исключаем кнопку "🏆 Тур" из общего цикла
-    document.querySelectorAll('.standings-sort-bar button:not(#show-last-round)').forEach(b => {
-      b.onclick = () => {
-        const s = b.dataset.sort;
-        if (!s) { state.standingsSort = { sortBy: '', order: '' }; loadStandings('', ''); return; }
-        const n = nextStandingsSort(s);
-        loadStandings(n.sortBy, n.order);
-      };
+    await batchWriteRows('Users', userUpdates);
+  }
+  return predictionUpdates.length;
+}
+
+async function fetchUCLMatches() {
+  const data = await fetchFootball(`/competitions/CL/matches?season=${SEASON}`);
+  const apiMatches = data.matches || [];
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const existingById = new Map();
+  matchesData.forEach((row, idx) => { if (!isDataRow(row, 'match_id')) return; existingById.set(String(row[0]).trim(), { row, rowIndex: idx }); });
+  const newRows = [], updates = [], recalcList = [];
+  for (const apiMatch of apiMatches) {
+    const matchId = String(apiMatch.id);
+    const homeTeam = translateTeam(apiMatch.homeTeam?.name || 'Unknown');
+    const awayTeam = translateTeam(apiMatch.awayTeam?.name || 'Unknown');
+    const kickoffUtc = apiMatch.utcDate || '';
+    const status = mapStatus(apiMatch.status);
+    const stage = mapStage(apiMatch.stage);
+    const apiHome = toScore(apiMatch.score?.fullTime?.home);
+    const apiAway = toScore(apiMatch.score?.fullTime?.away);
+    const existing = existingById.get(matchId);
+    if (!existing) {
+      let hs = '', as = '', ru = '';
+      if (status === 'finished' && apiHome !== null && apiAway !== null) { hs = apiHome; as = apiAway; ru = new Date().toISOString(); }
+      newRows.push([matchId, stage, homeTeam, awayTeam, kickoffUtc, status, hs, as, ru, 'FALSE']);
+      if (status === 'finished' && apiHome !== null && apiAway !== null) recalcList.push({ matchId, homeScore: apiHome, awayScore: apiAway });
+      continue;
+    }
+    const current = padRow(existing.row, EXPECTED_COLUMNS.Matches);
+    if (String(current[9] || '').toUpperCase() === 'TRUE') continue;
+    const oldStatus = String(current[5] || '').trim();
+    const oldHome = toScore(current[6]), oldAway = toScore(current[7]);
+    let hs = current[6], as = current[7], ru = current[8], shouldRecalc = false;
+    if (status === 'finished' && apiHome !== null && apiAway !== null) {
+      hs = apiHome; as = apiAway;
+      if (oldStatus !== 'finished' || oldHome !== apiHome || oldAway !== apiAway) { ru = new Date().toISOString(); shouldRecalc = true; }
+    } else if (status !== 'finished') {
+      hs = ''; as = ''; ru = '';
+      // FIX: если матч перестал быть finished — пересчитываем очки (обнуляем)
+      if (oldStatus === 'finished') shouldRecalc = true;
+    }
+    const updated = [matchId, stage, homeTeam, awayTeam, kickoffUtc, status, hs, as, ru, current[9] || 'FALSE'];
+    if (isDifferentRow(current, updated, EXPECTED_COLUMNS.Matches)) updates.push({ rowIndex: existing.rowIndex, values: updated });
+    if (shouldRecalc && apiHome !== null && apiAway !== null) recalcList.push({ matchId, homeScore: apiHome, awayScore: apiAway });
+  }
+  await appendRows('Matches', newRows);
+  await batchWriteRows('Matches', updates);
+  for (const item of recalcList) await recalculatePointsForMatch(item.matchId, item.homeScore, item.awayScore);
+  return { added: newRows.length, updated: updates.length, recalculated: recalcList.length };
+}
+
+async function updateFinishedMatches() {
+  const data = await fetchFootball(`/competitions/CL/matches?season=${SEASON}`);
+  const apiMatches = (data.matches || []).filter(m => m.status === 'FINISHED');
+  const matchesData = await getSheetData('Matches', 'A:J');
+  let updatedCount = 0;
+  for (const apiMatch of apiMatches) {
+    const matchId = String(apiMatch.id);
+    const rowIndex = matchesData.findIndex(r => isDataRow(r, 'match_id') && String(r[0]).trim() === matchId);
+    if (rowIndex === -1) continue;
+    const current = padRow(matchesData[rowIndex], EXPECTED_COLUMNS.Matches);
+    if (String(current[9] || '').toUpperCase() === 'TRUE') continue;
+    const homeScore = toScore(apiMatch.score?.fullTime?.home), awayScore = toScore(apiMatch.score?.fullTime?.away);
+    if (homeScore === null || awayScore === null) continue;
+    const currentHome = toScore(current[6]), currentAway = toScore(current[7]), currentStatus = String(current[5] || '').trim();
+    if (currentStatus === 'finished' && currentHome === homeScore && currentAway === awayScore) continue;
+    const updated = [...current];
+    updated[5] = 'finished'; updated[6] = homeScore; updated[7] = awayScore; updated[8] = new Date().toISOString(); updated[9] = current[9] || 'FALSE';
+    await writeRow('Matches', rowIndex, updated);
+    await recalculatePointsForMatch(matchId, homeScore, awayScore);
+    updatedCount++;
+  }
+  return updatedCount;
+}
+
+async function fetchMatchEvents(matchId) { const data = await fetchFootball(`/matches/${matchId}/events`); return data.events || []; }
+function buildEventRows(matchId, events, homeTeam, awayTeam) {
+  if (!Array.isArray(events)) return [];
+  const goalTypes = new Set(['GOAL', 'PENALTY', 'OWN_GOAL', 'GOAL_PENALTY', 'SCORE_CHANGE']);
+  const scoringEvents = events.filter(e => e && goalTypes.has(String(e.type || '').toUpperCase())).sort((a, b) => toNum(a.minute, 0) - toNum(b.minute, 0) || toNum(a.injuryTime, 0) - toNum(b.injuryTime, 0));
+  let hs = 0, as = 0;
+  const rows = [];
+  for (const event of scoringEvents) {
+    const rawTeam = event.team?.name || '';
+    const team = translateTeam(rawTeam);
+    const player = event.player?.name || '';
+    const minute = toNum(event.minute, 0), addedTime = toNum(event.injuryTime, 0);
+    const nt = String(team || rawTeam || '').toLowerCase().trim();
+    const nh = String(homeTeam || '').toLowerCase().trim();
+    const na = String(awayTeam || '').toLowerCase().trim();
+    if (nt && nh && nt === nh) hs++;
+    else if (nt && na && nt === na) as++;
+    rows.push([matchId, 'goal', team || rawTeam, minute, addedTime, `${hs}:${as}`, player]);
+  }
+  return rows;
+}
+async function updateMatchEventsForFinished() {
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const finishedMatches = matchesData.filter(r => isDataRow(r, 'match_id') && String(r[5] || '').trim() === 'finished');
+  const existingEvents = await getSheetData('MatchEvents', 'A:G');
+  const existingMatchIds = new Set(existingEvents.filter(r => isDataRow(r, 'match_id')).map(r => String(r[0]).trim()));
+  const matchesToProcess = finishedMatches.filter(r => !existingMatchIds.has(String(r[0]).trim())).slice(0, EVENTS_BATCH_SIZE);
+  for (const matchRow of matchesToProcess) {
+    const matchId = String(matchRow[0]).trim();
+    const homeTeam = String(matchRow[2] || '').trim();
+    const awayTeam = String(matchRow[3] || '').trim();
+    try {
+      const events = await fetchMatchEvents(matchId);
+      const rows = buildEventRows(matchId, events, homeTeam, awayTeam);
+      if (rows.length > 0) await appendRows('MatchEvents', rows);
+      else await appendRows('MatchEvents', [[matchId, 'no_events', '', 0, 0, '', '']]);
+    } catch (error) {
+      console.error(`Ошибка получения событий для матча ${matchId}:`, error.message);
+      if (error.status === 403 || error.status === 404) await appendRows('MatchEvents', [[matchId, 'events_unavailable', '', 0, 0, '', '']]);
+    }
+    if (matchRow !== matchesToProcess[matchesToProcess.length - 1]) await sleep(5000);
+  }
+  return matchesToProcess.length;
+}
+
+async function recalculateAll() {
+  const usersData = await getSheetData('Users', 'A:Z');
+  const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const finishedMatches = new Map();
+  matchesData.forEach(row => {
+    if (!isDataRow(row, 'match_id')) return;
+    const status = String(row[5] || '').trim();
+    if (status !== 'finished') return;
+    const hs = toScore(row[6]), as = toScore(row[7]);
+    if (hs === null || as === null) return;
+    finishedMatches.set(String(row[0]).trim(), { homeScore: hs, awayScore: as });
+  });
+  const latestMap = getLatestPredictionMap(predictionsData);
+  const userStats = new Map(), userRowIndexById = new Map();
+  usersData.forEach((row, idx) => {
+    if (!isDataRow(row, 'user_id')) return;
+    const userId = String(row[0]).trim();
+    if (!userId) return;
+    userRowIndexById.set(userId, idx);
+    userStats.set(userId, { totalPoints: 0, totalPredictions: 0, successfulPredictions: 0, exactScores: 0, goalDifference: 0, draws: 0, outcomes: 0, misses: 0 });
+  });
+  const predictionUpdates = [];
+  predictionsData.forEach((row, rowIndex) => {
+    if (!isDataRow(row, 'prediction_id')) return;
+    const userId = String(row[1] || '').trim(), matchId = String(row[2] || '').trim();
+    if (!userId || !matchId) return;
+    const key = `${userId}|${matchId}`;
+    const latest = latestMap.get(key);
+    const oldPoints = toNum(row[7], 0), oldType = String(row[8] || '').trim();
+    if (!latest || rowIndex !== latest.idx) {
+      if (oldPoints !== 0 || oldType !== 'duplicate') {
+        const upd = padRow(row, EXPECTED_COLUMNS.Predictions);
+        upd[7] = 0; upd[8] = 'duplicate';
+        predictionUpdates.push({ rowIndex, values: upd });
+      }
+      return;
+    }
+    const stats = userStats.get(userId);
+    if (stats) stats.totalPredictions++;
+    let points = 0, type = '';
+    const finishedMatch = finishedMatches.get(matchId);
+    if (finishedMatch) {
+      const result = calculatePoints(row[3], row[4], finishedMatch.homeScore, finishedMatch.awayScore);
+      points = result.points; type = result.type;
+      if (stats) {
+        stats.totalPoints += points;
+        if (points > 0) stats.successfulPredictions++;
+        if (type === 'exact') stats.exactScores++;
+        if (type === 'difference') stats.goalDifference++;
+        if (type === 'draw') stats.draws++;
+        if (type === 'outcome') stats.outcomes++;
+        if (type === 'miss') stats.misses++;
+      }
+    }
+    if (oldPoints !== points || oldType !== type) {
+      const upd = padRow(row, EXPECTED_COLUMNS.Predictions);
+      upd[6] = new Date().toISOString(); upd[7] = points; upd[8] = type;
+      predictionUpdates.push({ rowIndex, values: upd });
+    }
+  });
+  const userUpdates = [];
+  for (const [userId, stats] of userStats.entries()) {
+    const rowIndex = userRowIndexById.get(userId);
+    if (rowIndex === undefined) continue;
+    const updatedUser = padRow(usersData[rowIndex], EXPECTED_COLUMNS.Users);
+    updatedUser[4] = stats.totalPoints;
+    updatedUser[5] = stats.totalPredictions;   // FIX: заполняем total_predictions
+    updatedUser[6] = stats.successfulPredictions;
+    updatedUser[7] = stats.exactScores;
+    updatedUser[8] = stats.goalDifference;
+    updatedUser[9] = stats.draws;
+    updatedUser[10] = stats.outcomes;
+    updatedUser[11] = stats.misses;
+    userUpdates.push({ rowIndex, values: updatedUser });
+  }
+  await batchWriteRows('Predictions', predictionUpdates);
+  await batchWriteRows('Users', userUpdates);
+  return finishedMatches.size;
+}
+
+async function getUserPredictionsResponse(userId, query = {}) {
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const matches = matchesData.filter(r => isDataRow(r, 'match_id'));
+  const userPredictions = getLatestPredictionsForUser(predictionsData, userId);
+  let result = userPredictions.map(prediction => {
+    const matchId = String(prediction[2]).trim();
+    const match = matches.find(m => String(m[0]).trim() === matchId);
+    if (!match) return null;
+    return { match_id: matchId, stage: match[1] || '', home_team: match[2] || '', away_team: match[3] || '', kickoff_utc: match[4] || '', status: match[5] || '', home_score: toScore(match[6]), away_score: toScore(match[7]), predicted_home: toScore(prediction[3]), predicted_away: toScore(prediction[4]), points: toNum(prediction[7], 0), prediction_type: prediction[8] || '' };
+  }).filter(Boolean);
+  result = filterPredictionResponseByType(result, query.type);
+  const statusFilter = String(query.status || '').toLowerCase().trim();
+  if (statusFilter) result = result.filter(item => item.status === statusFilter);
+  return sortPredictionsResponse(result, query.sort);
+}
+
+// ========== Telegram Polling (с защитой от 409) ==========
+let telegramOffset = 0;
+let conflictCounter = 0;
+async function callTelegram(method, params) {
+  const url = `${TELEGRAM_API_BASE}/bot${BOT_TOKEN}/${method}`;
+  const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params) });
+  if (!response.ok) { const text = await response.text(); throw new Error(`Telegram API error: ${response.status} ${text}`); }
+  return response.json();
+}
+
+// FIX: регулярка требует пробелы вокруг разделителя — не ломается на «Будё-Глимт»
+function parsePredictionText(text) {
+  const clean = String(text || '').replace(/^\/predict(?:@\w+)?\s+/i, '').trim();
+  const match = clean.match(/^(.+?)\s+[-–—]\s+(.+?)\s+(\d{1,2})\s*:\s*(\d{1,2})$/i);
+  if (!match) return null;
+  const home = match[1].trim(), away = match[2].trim();
+  if (!home || !away) return null;
+  return { home, away, homeScore: Number(match[3]), awayScore: Number(match[4]) };
+}
+
+async function processTelegramMessage(msg) {
+  const chatId = msg.chat?.id, from = msg.from, text = msg.text || '';
+  if (!text || !from) return;
+  const userId = String(from.id), username = from.username || '';
+  const usersData = await getSheetData('Users', 'A:Z');
+  const existingUserIndex = usersData.findIndex(row => isDataRow(row, 'user_id') && String(row[0]).trim() === userId);
+  if (existingUserIndex === -1) {
+    let displayName = from.first_name || username || 'User';
+    if (from.last_name && from.first_name) displayName = `${from.first_name} ${from.last_name}`;
+    await appendRows('Users', [[userId, username, displayName, new Date().toISOString(), 0, 0, 0, 0, 0, 0, 0, 0]]);
+  }
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return;
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const matches = matchesData.filter(row => isDataRow(row, 'match_id'));
+  // FIX: читаем Predictions один раз
+  let predictionsData = await getSheetData('Predictions', 'A:Z');
+  let savedCount = 0;
+  for (const line of lines) {
+    const parsed = parsePredictionText(line);
+    if (!parsed) continue;
+    const homeNormalized = normalizeTeamName(parsed.home), awayNormalized = normalizeTeamName(parsed.away);
+    const match = matches.find(item => String(item[2] || '').toLowerCase().trim() === homeNormalized.toLowerCase() && String(item[3] || '').toLowerCase().trim() === awayNormalized.toLowerCase());
+    if (!match) continue;
+    const matchId = String(match[0]).trim(), status = String(match[5] || '').trim(), kickoff = new Date(match[4]);
+    if (status !== 'scheduled' || !Number.isFinite(kickoff.getTime()) || Date.now() >= kickoff.getTime()) continue;
+    const existingIndexes = [];
+    predictionsData.forEach((row, idx) => { if (isDataRow(row, 'prediction_id') && String(row[1]).trim() === userId && String(row[2]).trim() === matchId) existingIndexes.push(idx); });
+    await deleteRowsByRowIndices('Predictions', existingIndexes);
+    // локально обновим снимок, чтобы следующая строка видела актуальные данные
+    predictionsData = predictionsData.filter((_, i) => !existingIndexes.includes(i));
+    await appendRows('Predictions', [[`${userId}_${matchId}`, userId, matchId, parsed.homeScore, parsed.awayScore, new Date().toISOString(), new Date().toISOString(), 0, '']]);
+    savedCount++;
+  }
+  if (savedCount > 0) await callTelegram('sendMessage', { chat_id: chatId, text: `✅ Сохранено прогнозов: ${savedCount}` });
+}
+
+async function startBotPolling() {
+  if (!BOT_TOKEN) return;
+  console.log('Запуск Telegram polling...');
+  // FIX: удаляем webhook, чтобы не было 409 Conflict при старте
+  try {
+    await callTelegram('deleteWebhook', { drop_pending_updates: false });
+    console.log('Webhook удалён, начинаем polling.');
+  } catch (e) {
+    console.warn('Не удалось удалить webhook:', e.message);
+  }
+  while (true) {
+    try {
+      const response = await callTelegram('getUpdates', { offset: telegramOffset, timeout: 30, allowed_updates: ['message'] });
+      if (response.ok && response.result.length > 0) {
+        for (const update of response.result) {
+          telegramOffset = update.update_id + 1;
+          if (update.message) {
+            try { await processTelegramMessage(update.message); }
+            catch (e) { console.error('Ошибка обработки сообщения:', e.message); }
+          }
+        }
+      }
+      conflictCounter = 0;
+    } catch (error) {
+      const msg = String(error?.message || '');
+      const isConflict = msg.includes('409') || msg.includes('Conflict');
+      if (isConflict) {
+        conflictCounter++;
+        const waitMs = conflictCounter <= 3 ? 10000 : 30000;
+        if (conflictCounter <= 3) console.warn(`⚠️ Конфликт polling (409). Ждём ${waitMs / 1000}с... (попытка ${conflictCounter})`);
+        await sleep(waitMs);
+      } else {
+        console.error('Ошибка polling:', msg || error);
+        await sleep(5000);
+      }
+    }
+    await sleep(1000);
+  }
+}
+
+// ========== История позиций (стрелки ▲▼) ==========
+app.get('/api/standings-history', asyncHandler(async (req, res) => {
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const finishedMatches = matchesData.filter(row => isDataRow(row, 'match_id') && String(row[5] || '').trim() === 'finished').map(row => ({ matchId: String(row[0]).trim(), timestamp: new Date(row[8] || row[4] || '').getTime() || 0 })).sort((a, b) => a.timestamp - b.timestamp);
+  if (!finishedMatches.length) return res.json({ previousPositions: {}, currentPositions: {} });
+  const allIds = finishedMatches.map(m => m.matchId);
+  const previousIds = allIds.slice(0, -1);
+  const calc = (ids) => {
+    const set = new Set(ids);
+    const userPoints = new Map();
+    predictionsData.forEach(row => {
+      if (!isDataRow(row, 'prediction_id')) return;
+      const matchId = String(row[2] || '').trim();
+      if (!set.has(matchId)) return;
+      const userId = String(row[1] || '').trim();
+      if (String(row[8] || '').trim() === 'duplicate') return;
+      userPoints.set(userId, (userPoints.get(userId) || 0) + toNum(row[7], 0));
     });
-  } catch (error) { app.innerHTML = `<div class="empty-state error">Ошибка загрузки таблицы: ${escapeHtml(error.message)}</div>`; }
-}
+    const pos = {};
+    [...userPoints.entries()].sort((a, b) => b[1] - a[1]).forEach(([uid], i) => pos[uid] = i + 1);
+    return pos;
+  };
+  res.json({ previousPositions: calc(previousIds), currentPositions: calc(allIds) });
+}));
 
-async function showParticipantPredictions(targetUserId, displayName, type) {
-  const titles = { all: `Все прогнозы — ${displayName}`, successful: `Матчи с очками — ${displayName}`, exact: `Точные счета — ${displayName}`, difference: `Угаданная разница — ${displayName}`, draw: `Угаданные ничьи — ${displayName}`, outcome: `Угаданные исходы — ${displayName}`, miss: `Промахи — ${displayName}` };
-  try {
-    const params = new URLSearchParams({ sort: 'date_desc' });
-    if (type && type !== 'all') params.set('type', type);
-    const predictions = await apiJson(`/api/user-predictions/${encodeURIComponent(targetUserId)}?${params.toString()}`);
-    const bodyHtml = predictions.length ? predictions.map(predictionCardHtml).join('') : '<div class="empty-state compact">Матчей по этой категории нет.</div>';
-    const overlay = openModal(titles[type] || titles.all, bodyHtml);
-    const chartButton = document.createElement('button');
-    chartButton.className = 'primary-button';
-    chartButton.textContent = '📊 Показать динамику очков';
-    chartButton.style.marginTop = '1rem';
-    chartButton.style.width = '100%';
-    chartButton.onclick = () => showPointsChart(targetUserId, displayName);
-    overlay.querySelector('.modal-body').insertBefore(chartButton, overlay.querySelector('.modal-body').firstChild);
-  } catch (error) { alert(`Ошибка загрузки прогнозов участника: ${error.message}`); }
-}
+// ========== Динамика очков пользователя ==========
+app.get('/api/user-points-history/:userId', asyncHandler(async (req, res) => {
+  const userId = String(req.params.userId || '').trim();
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const matchById = new Map();
+  matchesData.forEach(row => { if (isDataRow(row, 'match_id')) matchById.set(String(row[0]).trim(), row); });
+  const latestMap = getLatestPredictionMap(predictionsData);
+  const dailyMap = new Map();
+  for (const item of latestMap.values()) {
+    const row = predictionsData[item.idx];
+    if (!row || String(row[1] || '').trim() !== userId) continue;
+    if (String(row[8] || '').trim() === 'duplicate') continue;
+    const match = matchById.get(String(row[2] || '').trim());
+    if (!match || String(match[5] || '').trim() !== 'finished') continue;
+    const hs = toScore(match[6]), as = toScore(match[7]);
+    if (hs === null || as === null) continue;
+    const result = calculatePoints(row[3], row[4], hs, as);
+    const date = new Date(match[8] || match[4] || '');
+    if (!Number.isFinite(date.getTime())) continue;
+    const dayKey = date.toISOString().slice(0, 10);
+    dailyMap.set(dayKey, (dailyMap.get(dayKey) || 0) + result.points);
+  }
+  const history = [...dailyMap.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([date, points]) => ({ date, label: new Date(`${date}T00:00:00Z`).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', timeZone: 'UTC' }), points }));
+  res.json(history);
+}));
 
-async function showPointsChart(targetUserId, displayName) {
-  try {
-    const history = await apiJson(`/api/user-points-history/${encodeURIComponent(targetUserId)}`);
-    if (!history.length) { alert('Нет данных для построения графика'); return; }
-    const overlay = openModal(`Динамика очков — ${displayName}`, `<div class="chart-container"><canvas id="pointsChart"></canvas></div><div class="muted" style="margin-top: 8px; text-align: center;">Сумма очков за каждый игровой день</div>`);
-    if (!window.Chart) { await new Promise((resolve, reject) => { const script = document.createElement('script'); script.src = 'https://cdn.jsdelivr.net/npm/chart.js'; script.onload = resolve; script.onerror = reject; document.head.appendChild(script); }); }
-    new Chart(document.getElementById('pointsChart').getContext('2d'), {
-      type: 'bar',
-      data: { labels: history.map(h => h.label), datasets: [{ label: 'Очки за день', data: history.map(h => h.points), backgroundColor: 'rgba(75, 192, 192, 0.65)', borderColor: 'rgb(75, 192, 192)', borderWidth: 1, borderRadius: 6 }] },
-      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: true } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }
+// ========== Турнирная таблица за последние 3 дня ==========
+app.get('/api/standings-last-round', asyncHandler(async (req, res) => {
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const usersData = await getSheetData('Users', 'A:Z');
+  const finishedMatches = matchesData.filter(row => isDataRow(row, 'match_id') && String(row[5] || '').trim() === 'finished').map(row => ({ matchId: String(row[0]).trim(), timestamp: new Date(row[8] || row[4] || '').getTime() || 0 })).filter(m => m.timestamp > 0).sort((a, b) => b.timestamp - a.timestamp);
+  if (!finishedMatches.length) return res.json([]);
+  const cutoff = finishedMatches[0].timestamp - (3 * 24 * 60 * 60 * 1000);
+  const roundMatchIds = new Set(finishedMatches.filter(m => m.timestamp >= cutoff).map(m => m.matchId));
+  const latestMap = getLatestPredictionMap(predictionsData);
+  const perUser = new Map();
+  for (const item of latestMap.values()) {
+    const row = predictionsData[item.idx];
+    if (!row) continue;
+    const matchId = String(row[2] || '').trim();
+    if (!roundMatchIds.has(matchId) || String(row[8] || '').trim() === 'duplicate') continue;
+    const uid = String(row[1] || '').trim();
+    if (!uid) continue;
+    const match = matchesData.find(r => isDataRow(r, 'match_id') && String(r[0]).trim() === matchId);
+    if (!match) continue;
+    const hs = toScore(match[6]), as = toScore(match[7]);
+    if (hs === null || as === null) continue;
+    const result = calculatePoints(row[3], row[4], hs, as);
+    if (!perUser.has(uid)) perUser.set(uid, { points: 0, exact: 0, difference: 0, draw: 0, outcome: 0, miss: 0 });
+    const stats = perUser.get(uid);
+    stats.points += result.points;
+    if (result.type === 'exact') stats.exact++;
+    else if (result.type === 'difference') stats.difference++;
+    else if (result.type === 'draw') stats.draw++;
+    else if (result.type === 'outcome') stats.outcome++;
+    else if (result.type === 'miss') stats.miss++;
+  }
+  const userMap = new Map();
+  usersData.forEach(row => { if (isDataRow(row, 'user_id')) userMap.set(String(row[0]).trim(), row[2] || row[1] || String(row[0]).trim()); });
+  const table = [...perUser.entries()].map(([uid, stats]) => ({ userId: uid, displayName: userMap.get(uid) || uid, ...stats })).sort((a, b) => b.points - a.points || b.exact - a.exact);
+  table.forEach((row, i) => row.position = i + 1);
+  res.json(table);
+}));
+
+// ========== Основные маршруты ==========
+app.post('/api/auth', asyncHandler(async (req, res) => {
+  const initDataString = req.body.initData;
+  let user = null;
+  if (initDataString) {
+    if (BOT_TOKEN && !verifyTelegramInitData(initDataString)) return res.status(403).json({ error: 'Invalid initData' });
+    try { user = JSON.parse(new URLSearchParams(initDataString).get('user') || 'null'); } catch { user = null; }
+  }
+  if (!user?.id && ALLOW_PLAIN_USER_ID && isNotEmpty(req.body.userId)) user = { id: req.body.userId, username: req.body.username || '', first_name: req.body.firstName || '', last_name: req.body.lastName || '' };
+  if (!user?.id) return res.status(400).json({ error: 'userId required' });
+  const userId = String(user.id).trim();
+  const usersData = await getSheetData('Users', 'A:Z');
+  const existingUser = usersData.find(row => isDataRow(row, 'user_id') && String(row[0]).trim() === userId);
+  if (!existingUser) {
+    let displayName = user.first_name || user.username || 'User';
+    if (user.last_name && user.first_name) displayName = `${user.first_name} ${user.last_name}`;
+    await appendRows('Users', [[userId, user.username || '', displayName, new Date().toISOString(), 0, 0, 0, 0, 0, 0, 0, 0]]);
+    return res.json({ userId, displayName });
+  }
+  return res.json({ userId, displayName: existingUser[2] || existingUser[1] || 'User' });
+}));
+
+app.get('/api/matches', asyncHandler(async (req, res) => {
+  const userId = req.query.userId ? String(req.query.userId).trim() : null;
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const matches = matchesData.filter(row => isDataRow(row, 'match_id'));
+  let userPredictions = [];
+  if (userId) userPredictions = getLatestPredictionsForUser(await getSheetData('Predictions', 'A:Z'), userId);
+  let result = matches.map(row => {
+    const matchId = String(row[0]).trim();
+    const userPrediction = userPredictions.find(p => String(p[2]).trim() === matchId);
+    return { match_id: matchId, stage: row[1] || '', home_team: row[2] || '', away_team: row[3] || '', kickoff_utc: row[4] || '', status: row[5] || '', home_score: toScore(row[6]), away_score: toScore(row[7]), user_has_predicted: Boolean(userPrediction), user_prediction: userPrediction ? { home: toScore(userPrediction[3]), away: toScore(userPrediction[4]) } : null };
+  });
+  const includeFinished = String(req.query.includeFinished || 'true').toLowerCase() !== 'false';
+  const statusFilter = String(req.query.status || '').toLowerCase().trim();
+  if (!includeFinished) result = result.filter(item => item.status !== 'finished');
+  if (statusFilter) result = result.filter(item => item.status === statusFilter);
+  result.sort((a, b) => (new Date(a.kickoff_utc).getTime() || Infinity) - (new Date(b.kickoff_utc).getTime() || Infinity));
+  res.json(result);
+}));
+
+app.get('/api/my-predictions', asyncHandler(async (req, res) => {
+  const userId = req.query.userId ? String(req.query.userId).trim() : '';
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  res.json(await getUserPredictionsResponse(userId, req.query));
+}));
+
+app.get('/api/user-predictions/:userId', asyncHandler(async (req, res) => {
+  const userId = String(req.params.userId || '').trim();
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  res.json(await getUserPredictionsResponse(userId, req.query));
+}));
+
+app.post('/api/predictions', asyncHandler(async (req, res) => {
+  const userId = extractUserId(req);
+  const { matchId, predictedHome, predictedAway } = req.body;
+  if (!userId || !matchId || predictedHome === undefined || predictedAway === undefined) return res.status(400).json({ error: 'Missing parameters' });
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const matchRowIndex = matchesData.findIndex(row => isDataRow(row, 'match_id') && String(row[0]).trim() === String(matchId).trim());
+  if (matchRowIndex === -1) return res.status(404).json({ error: 'Match not found' });
+  const match = padRow(matchesData[matchRowIndex], EXPECTED_COLUMNS.Matches);
+  const status = String(match[5] || '').trim(), kickoff = new Date(match[4]);
+  if (status !== 'scheduled') return res.status(400).json({ error: 'Match is not available for prediction' });
+  if (!Number.isFinite(kickoff.getTime()) || Date.now() >= kickoff.getTime()) return res.status(400).json({ error: 'Match already started' });
+  const pHome = toScore(predictedHome), pAway = toScore(predictedAway);
+  if (pHome === null || pAway === null || pHome < 0 || pAway < 0 || pHome > 20 || pAway > 20) return res.status(400).json({ error: 'Invalid score' });
+  const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const existingIndexes = [];
+  predictionsData.forEach((row, rowIndex) => { if (isDataRow(row, 'prediction_id') && String(row[1]).trim() === String(userId).trim() && String(row[2]).trim() === String(matchId).trim()) existingIndexes.push(rowIndex); });
+  await deleteRowsByRowIndices('Predictions', existingIndexes);
+  await appendRows('Predictions', [[`${userId}_${matchId}`, userId, matchId, pHome, pAway, new Date().toISOString(), new Date().toISOString(), 0, '']]);
+  res.json({ success: true });
+}));
+
+app.post('/api/admin/match-result', requireAdmin, asyncHandler(async (req, res) => {
+  const { matchId, homeScore, awayScore } = req.body;
+  if (!matchId || homeScore === undefined || awayScore === undefined) return res.status(400).json({ error: 'Missing parameters' });
+  const hScore = toScore(homeScore), aScore = toScore(awayScore);
+  if (hScore === null || aScore === null || hScore < 0 || aScore < 0 || hScore > 20 || aScore > 20) return res.status(400).json({ error: 'Invalid score' });
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const rowIndex = matchesData.findIndex(row => isDataRow(row, 'match_id') && String(row[0]).trim() === String(matchId).trim());
+  if (rowIndex === -1) return res.status(404).json({ error: 'Match not found' });
+  const updatedMatch = padRow(matchesData[rowIndex], EXPECTED_COLUMNS.Matches);
+  updatedMatch[5] = 'finished'; updatedMatch[6] = hScore; updatedMatch[7] = aScore; updatedMatch[8] = new Date().toISOString(); updatedMatch[9] = 'TRUE';
+  await writeRow('Matches', rowIndex, updatedMatch);
+  await recalculatePointsForMatch(matchId, hScore, aScore);
+  res.json({ success: true, processed: true });
+}));
+
+app.get('/api/match-predictions/:matchId', asyncHandler(async (req, res) => {
+  const matchId = String(req.params.matchId || '').trim();
+  const predictionsData = await getSheetData('Predictions', 'A:Z');
+  const latestMap = getLatestPredictionMap(predictionsData);
+  const matchPredictions = [...latestMap.values()].map(item => predictionsData[item.idx]).filter(row => row && String(row[2] || '').trim() === matchId);
+  const usersData = await getSheetData('Users', 'A:Z');
+  const userMap = new Map();
+  usersData.forEach(row => { if (isDataRow(row, 'user_id')) userMap.set(String(row[0]).trim(), row[2] || row[1] || String(row[0]).trim()); });
+  res.json(matchPredictions.map(prediction => ({ userId: String(prediction[1] || '').trim(), displayName: userMap.get(String(prediction[1] || '').trim()) || prediction[1], predictedHome: toScore(prediction[3]), predictedAway: toScore(prediction[4]), points: toNum(prediction[7], 0), predictionType: prediction[8] || '' })));
+}));
+
+app.get('/api/match-events/:matchId', asyncHandler(async (req, res) => {
+  const matchId = String(req.params.matchId || '').trim();
+  const eventsData = await getSheetData('MatchEvents', 'A:G');
+  const matchEvents = eventsData.filter(row => isDataRow(row, 'match_id') && String(row[0]).trim() === matchId && String(row[1] || '').trim() !== 'no_events' && String(row[1] || '').trim() !== 'events_unavailable');
+  const result = matchEvents.map(event => ({ matchId: String(event[0]).trim(), eventType: event[1] || '', team: event[2] || '', minute: toNum(event[3], 0), addedTime: toNum(event[4], 0), scoreAfterEvent: event[5] || '', player: event[6] || '' }));
+  result.sort((a, b) => a.minute - b.minute || a.addedTime - b.addedTime);
+  res.json(result);
+}));
+
+app.get('/api/match-odds/:matchId', asyncHandler(async (req, res) => {
+  if (!ODDS_API_KEY) return res.json({ enabled: false, odds: null });
+  const matchId = String(req.params.matchId || '').trim();
+  const matchesData = await getSheetData('Matches', 'A:J');
+  const matchRow = matchesData.find(row => isDataRow(row, 'match_id') && String(row[0]).trim() === matchId);
+  if (!matchRow) return res.status(404).json({ error: 'Match not found' });
+  if (String(matchRow[5] || '').trim() !== 'scheduled') return res.json({ enabled: true, odds: null });
+  const kickoffTime = new Date(matchRow[4] || '').getTime();
+  const homeApi = String(storedTeamToApiTeam(matchRow[2]) || '').toLowerCase().trim();
+  const awayApi = String(storedTeamToApiTeam(matchRow[3]) || '').toLowerCase().trim();
+  if (!homeApi || !awayApi) return res.json({ enabled: true, odds: null });
+  const events = await fetchOddsEvents();
+  let selectedEvent = null, swapped = false;
+  for (const event of events) {
+    const eventTime = new Date(event.commence_time || '').getTime();
+    if (Number.isFinite(kickoffTime) && Number.isFinite(eventTime) && Math.abs(eventTime - kickoffTime) > 4 * 60 * 60 * 1000) continue;
+    const eventHome = String(findOurApiTeamName(event.home_team) || '').toLowerCase().trim();
+    const eventAway = String(findOurApiTeamName(event.away_team) || '').toLowerCase().trim();
+    if (eventHome === homeApi && eventAway === awayApi) { selectedEvent = event; swapped = false; break; }
+    if (eventHome === awayApi && eventAway === homeApi) { selectedEvent = event; swapped = true; break; }
+  }
+  if (!selectedEvent) return res.json({ enabled: true, odds: null });
+  const odds = getOddsFromEvent(selectedEvent);
+  if (!odds) return res.json({ enabled: true, odds: null });
+  if (swapped) return res.json({ enabled: true, odds: { home: odds.away, draw: odds.draw, away: odds.home, bookmakers: odds.bookmakers } });
+  return res.json({ enabled: true, odds });
+}));
+
+app.get('/api/standings', asyncHandler(async (req, res) => {
+  const usersData = await getSheetData('Users', 'A:Z');
+  const users = usersData.filter(row => isDataRow(row, 'user_id'));
+  const table = users.map(row => ({ userId: String(row[0] || '').trim(), username: row[1] || '', displayName: row[2] || row[1] || 'User', registrationDate: row[3] || '', totalPoints: toNum(row[4], 0), successfulPredictions: toNum(row[6], 0), exactScores: toNum(row[7], 0), goalDifference: toNum(row[8], 0), draws: toNum(row[9], 0), outcomes: toNum(row[10], 0), misses: toNum(row[11], 0) })).filter(user => user.userId);
+  const sortBy = String(req.query.sortBy || '').toLowerCase().trim();
+  const requestedOrder = String(req.query.order || '').toLowerCase().trim();
+  const sortableFields = { points: 'totalPoints', totalpoints: 'totalPoints', exact: 'exactScores', exactscores: 'exactScores', difference: 'goalDifference', goaldifference: 'goalDifference', draws: 'draws', outcomes: 'outcomes', misses: 'misses', successful: 'successfulPredictions', successfulpredictions: 'successfulPredictions' };
+  const hasActivity = user => (toNum(user.successfulPredictions, 0) + toNum(user.exactScores, 0) + toNum(user.goalDifference, 0) + toNum(user.draws, 0) + toNum(user.outcomes, 0) + toNum(user.misses, 0)) > 0;
+  if (sortBy === 'misses') {
+    const order = requestedOrder === 'desc' ? -1 : 1;
+    table.sort((a, b) => {
+      const aActive = hasActivity(a) ? 0 : 1;
+      const bActive = hasActivity(b) ? 0 : 1;
+      if (aActive !== bActive) return aActive - bActive;
+      if (a.misses !== b.misses) return (a.misses - b.misses) * order;
+      if (b.totalPoints !== a.totalPoints) return b.totalPoints - a.totalPoints;
+      return String(a.userId).localeCompare(String(b.userId), 'ru', { numeric: true });
     });
-  } catch (error) { alert(`Ошибка загрузки графика: ${error.message}`); }
-}
+  } else if (sortBy && sortableFields[sortBy]) {
+    const field = sortableFields[sortBy];
+    const order = requestedOrder ? (requestedOrder === 'asc' ? 1 : -1) : (sortBy === 'misses' ? 1 : -1);
+    table.sort((a, b) => ((a[field] || 0) - (b[field] || 0)) * order || String(a.userId).localeCompare(String(b.userId), 'ru', { numeric: true }));
+  } else {
+    table.sort((a, b) => {
+      if (b.totalPoints !== a.totalPoints) return b.totalPoints - a.totalPoints;
+      if (b.exactScores !== a.exactScores) return b.exactScores - a.exactScores;
+      if (b.goalDifference !== a.goalDifference) return b.goalDifference - a.goalDifference;
+      if (b.draws !== a.draws) return b.draws - a.draws;
+      if (b.outcomes !== a.outcomes) return b.outcomes - a.outcomes;
+      if (a.misses !== b.misses) return a.misses - b.misses;
+      if (b.successfulPredictions !== a.successfulPredictions) return b.successfulPredictions - a.successfulPredictions;
+      return String(a.userId).localeCompare(String(b.userId), 'ru', { numeric: true });
+    });
+  }
+  table.forEach((row, index) => { row.position = index + 1; });
+  res.json(table);
+}));
 
-async function showLastRoundStandings() {
-  try {
-    const table = await apiJson('/api/standings-last-round');
-    if (!table.length) { openModal('Турнирная таблица за последний тур', '<div class="empty-state">За последние 3 дня нет завершённых матчей.</div>'); return; }
-    let html = '<div class="muted" style="margin-bottom: 10px;">Учитываются завершённые матчи максимум за последние 3 дня.</div><div class="responsive-table"><table><thead><tr><th>#</th><th>Участник</th><th>Очки</th><th>Точные</th><th>Разница</th><th>Ничьи</th><th>Исходы</th><th>Промахи</th></tr></thead><tbody>';
-    table.forEach(row => { html += `<tr><td>${row.position}</td><td>${escapeHtml(row.displayName)}</td><td class="round-points">${row.points}</td><td>${row.exact}</td><td>${row.difference}</td><td>${row.draw}</td><td>${row.outcome}</td><td>${row.miss}</td></tr>`; });
-    html += '</tbody></table></div>';
-    openModal('Турнирная таблица за последние 3 дня', html);
-  } catch (error) { alert(`Ошибка загрузки таблицы за тур: ${error.message}`); }
-}
+app.post('/api/admin/sync-matches', requireAdmin, asyncHandler(async (req, res) => { try { res.json({ success: true, ...(await fetchUCLMatches()) }); } catch (e) { res.status(500).json({ success: false, error: e.message }); } }));
+app.post('/api/admin/update-results', requireAdmin, asyncHandler(async (req, res) => { try { res.json({ success: true, updated: await updateFinishedMatches() }); } catch (e) { res.status(500).json({ success: false, error: e.message }); } }));
+app.post('/api/admin/update-events', requireAdmin, asyncHandler(async (req, res) => { try { res.json({ success: true, processed: await updateMatchEventsForFinished() }); } catch (e) { res.status(500).json({ success: false, error: e.message }); } }));
+app.post('/api/admin/recalculate-all', requireAdmin, asyncHandler(async (req, res) => { try { res.json({ success: true, processed: await recalculateAll() }); } catch (e) { res.status(500).json({ success: false, error: e.message }); } }));
 
-document.getElementById('nav-matches').addEventListener('click', () => loadMatches());
-document.getElementById('nav-my-predictions').addEventListener('click', () => loadMyPredictions('all'));
-document.getElementById('nav-standings').addEventListener('click', () => { state.standingsSort = { sortBy: '', order: '' }; loadStandings('', ''); });
-auth();
+app.use((error, req, res, next) => { console.error(error); res.status(500).json({ error: 'Internal server error' }); });
+
+let syncInProgress = false;
+async function scheduledSync() {
+  if (syncInProgress) return;
+  syncInProgress = true;
+  try { await fetchUCLMatches(); await updateFinishedMatches(); await updateMatchEventsForFinished(); } catch (e) { console.error(e); } finally { syncInProgress = false; }
+}
+if (AUTO_SYNC && FOOTBALL_DATA_API_KEY) { setTimeout(() => scheduledSync().catch(console.error), 10000); setInterval(() => scheduledSync().catch(console.error), SYNC_INTERVAL_MS); }
+
+const PORT = process.env.PORT || 3000;
+const server = app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); if (BOT_TOKEN) startBotPolling().catch(console.error); });
+server.on('error', err => console.error('Server error:', err));
