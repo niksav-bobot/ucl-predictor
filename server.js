@@ -189,7 +189,7 @@ function requireAdmin(req, res, next) {
 }
 const asyncHandler = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-// ========== Команды и очки ==========
+// ========== Команды и переводы ==========
 const teamTranslations = { 'Real Madrid CF': 'Реал Мадрид', 'FC Barcelona': 'Барселона', 'Manchester City FC': 'Манчестер Сити', 'Liverpool FC': 'Ливерпуль', 'FC Bayern München': 'Бавария', 'Paris Saint-Germain FC': 'ПСЖ', 'Juventus FC': 'Ювентус', 'AC Milan': 'Милан', 'Chelsea FC': 'Челси', 'Arsenal FC': 'Арсенал', 'Borussia Dortmund': 'Боруссия Дортмунд', 'Club Atlético de Madrid': 'Атлетико Мадрид', 'FC Internazionale Milano': 'Интер', 'SSC Napoli': 'Наполи', 'FC Porto': 'Порту', 'SL Benfica': 'Бенфика', 'AFC Ajax': 'Аякс', 'Olympique Lyonnais': 'Лион', 'AS Monaco FC': 'Монако', 'FC Red Bull Salzburg': 'Зальцбург', 'FK Shakhtar Donetsk': 'Шахтер', 'GNK Dinamo Zagreb': 'Динамо Загреб', 'Celtic FC': 'Селтик', 'Rangers FC': 'Рейнджерс', 'Club Brugge KV': 'Брюгге', 'Galatasaray SK': 'Галатасарай', 'Fenerbahçe SK': 'Фенербахче', 'Olympiacos FC': 'Олимпиакос', 'AEK Athens FC': 'АЕК', 'Maccabi Haifa FC': 'Маккаби Хайфа', 'FC København': 'Копенгаген', 'BSC Young Boys': 'Янг Бойз', 'FK Crvena Zvezda': 'Црвена Звезда', 'Racing Club de Lens': 'Ланс', 'Real Sociedad de Fútbol': 'Реал Сосьедад', 'PSV': 'ПСВ', 'Feyenoord Rotterdam': 'Фейеноорд', 'Sporting CP': 'Спортинг', 'Sporting Clube de Portugal': 'Спортинг', 'FC Viktoria Plzeň': 'Виктория Пльзень', 'Stade Brestois 29': 'Брест', 'VfB Stuttgart': 'Штутгарт', 'Aston Villa FC': 'Астон Вилла', 'Bologna FC 1909': 'Болонья', 'Girona FC': 'Жирона', 'RC Celta de Vigo': 'Сельта', 'Real Betis Balompié': 'Бетис', 'Sevilla FC': 'Севилья', 'Valencia CF': 'Валенсия', 'Lazio Roma': 'Лацио', 'Atalanta BC': 'Аталанта', 'AS Roma': 'Рома', 'Olympique de Marseille': 'Марсель', 'Lille OSC': 'Лилль', 'OGC Nice': 'Ницца', 'Stade Rennais FC': 'Ренн', 'RC Strasbourg Alsace': 'Страсбур', 'FC Nantes': 'Нант', 'SC Braga': 'Брага', 'RSC Anderlecht': 'Андерлехт', 'KRC Genk': 'Генк', 'Ferencvárosi TC': 'Ференцварош', 'Ludogorets Razgrad': 'Лудогорец', 'Qarabağ FK': 'Карабах', 'Sparta Praha': 'Спарта Прага', 'Slavia Praha': 'Славия Прага', 'SK Slavia Praha': 'Славия Прага', 'FC Basel 1893': 'Базель', 'Grasshopper Club Zürich': 'Грассхоппер', 'Manchester United FC': 'Манчестер Юнайтед', 'Villarreal CF': 'Вильярреал', 'PAE AEK': 'АЕК', 'LASK Linz': 'ЛАСК', 'Viking FK': 'Викинг', 'ŠK Slovan Bratislava': 'Слован Братислава', 'FK Bodø/Glimt': 'Будё-Глимт', 'Como 1907': 'Комо', 'RB Leipzig': 'РБ Лейпциг', 'Sabah FK': 'Сабах' };
 const teamSynonyms = { 'мс': 'Манчестер Сити', 'ман сити': 'Манчестер Сити', 'мю': 'Манчестер Юнайтед', 'ман юнайтед': 'Манчестер Юнайтед', 'манчестер юнайтед': 'Манчестер Юнайтед', 'реал': 'Реал Мадрид', 'реал мадрид': 'Реал Мадрид', 'барса': 'Барселона', 'барселона': 'Барселона', 'бавария': 'Бавария', 'бавария мюнхен': 'Бавария', 'дортмунд': 'Боруссия Дортмунд', 'боруссия д': 'Боруссия Дортмунд', 'боруссия дортмунд': 'Боруссия Дортмунд', 'атлетико': 'Атлетико Мадрид', 'атлетико мадрид': 'Атлетико Мадрид', 'интер': 'Интер', 'наполи': 'Наполи', 'псж': 'ПСЖ', 'пари сен-жермен': 'ПСЖ', 'париж': 'ПСЖ', 'ливерпуль': 'Ливерпуль', 'челси': 'Челси', 'арсенал': 'Арсенал', 'ювентус': 'Ювентус', 'милан': 'Милан', 'аякс': 'Аякс', 'порту': 'Порту', 'бенфика': 'Бенфика', 'лион': 'Лион', 'монако': 'Монако', 'зальцбург': 'Зальцбург', 'шахтер': 'Шахтер', 'динамо загреб': 'Динамо Загреб', 'селтик': 'Селтик', 'рейнджерс': 'Рейнджерс', 'брюгге': 'Брюгге', 'галатасарай': 'Галатасарай', 'фенербахче': 'Фенербахче', 'олимпиакос': 'Олимпиакос', 'аек': 'АЕК', 'маккаби хайфа': 'Маккаби Хайфа', 'копенгаген': 'Копенгаген', 'янг бойз': 'Янг Бойз', 'црвена звезда': 'Црвена Звезда', 'ланс': 'Ланс', 'реал сосьедад': 'Реал Сосьедад', 'псв': 'ПСВ', 'фейеноорд': 'Фейеноорд', 'спортинг': 'Спортинг', 'спортинг лиссабон': 'Спортинг', 'виктория пльзень': 'Виктория Пльзень', 'брест': 'Брест', 'штутгарт': 'Штутгарт', 'астон вилла': 'Астон Вилла', 'болонья': 'Болонья', 'жирона': 'Жирона', 'сельта': 'Сельта', 'бетис': 'Бетис', 'севилья': 'Севилья', 'валенсия': 'Валенсия', 'лацио': 'Лацио', 'аталанта': 'Аталанта', 'рома': 'Рома', 'марсель': 'Марсель', 'лилль': 'Лилль', 'ницца': 'Ницца', 'ренн': 'Ренн', 'страсбур': 'Страсбур', 'нант': 'Нант', 'брага': 'Брага', 'андерлехт': 'Андерлехт', 'генк': 'Генк', 'ференцварош': 'Ференцварош', 'лудогорец': 'Лудогорец', 'карабах': 'Карабах', 'спарта прага': 'Спарта Прага', 'славия прага': 'Славия Прага', 'базель': 'Базель', 'грассхоппер': 'Грассхоппер', 'вильярреал': 'Вильярреал', 'ласк': 'ЛАСК', 'викинг': 'Викинг', 'слован братислава': 'Слован Братислава', 'будё-глимт': 'Будё-Глимт', 'комо': 'Комо', 'рб лейпциг': 'РБ Лейпциг', 'сабах': 'Сабах' };
 const teamAliases = new Map();
@@ -203,7 +203,7 @@ function normalizeTeamName(name) {
   return teamAliases.has(cleaned) ? teamAliases.get(cleaned) : String(name || '').trim();
 }
 
-// ========== Помощники для Odds API ==========
+// ========== Odds API helpers ==========
 const ruToApiTeam = new Map();
 const apiTeamLowerMap = new Map();
 Object.entries(teamTranslations).forEach(([api, ru]) => { ruToApiTeam.set(ru.toLowerCase().trim(), api); apiTeamLowerMap.set(api.toLowerCase().trim(), api); });
@@ -245,6 +245,7 @@ function getOddsFromEvent(event) {
   return { home, draw, away, bookmakers: rows.length };
 }
 
+// ========== Football-Data.org ==========
 function mapStage(apiStage) { const stages = { PRELIMINARY: 'Предварительный раунд', FIRST_QUALIFYING_ROUND: '1-й квал. раунд', SECOND_QUALIFYING_ROUND: '2-й квал. раунд', THIRD_QUALIFYING_ROUND: '3-й квал. раунд', PLAY_OFF_ROUND: 'Раунд плей-офф', GROUP_STAGE: 'Групповой этап', ROUND_OF_16: '1/8 финала', QUARTER_FINALS: '1/4 финала', SEMI_FINALS: 'Полуфинал', FINAL: 'Финал' }; return stages[apiStage] || apiStage; }
 function mapStatus(apiStatus) { if (apiStatus === 'SCHEDULED' || apiStatus === 'TIMED') return 'scheduled'; if (apiStatus === 'LIVE' || apiStatus === 'IN_PLAY' || apiStatus === 'PAUSED') return 'live'; if (apiStatus === 'FINISHED') return 'finished'; if (apiStatus === 'POSTPONED') return 'postponed'; if (apiStatus === 'SUSPENDED' || apiStatus === 'CANCELLED') return apiStatus.toLowerCase(); return String(apiStatus || '').toLowerCase(); }
 async function fetchFootball(path) {
@@ -541,6 +542,7 @@ async function getUserPredictionsResponse(userId, query = {}) {
 
 // ========== Telegram Polling (с защитой от 409) ==========
 let telegramOffset = 0;
+let conflictCounter = 0;
 async function callTelegram(method, params) {
   const url = `${TELEGRAM_API_BASE}/bot${BOT_TOKEN}/${method}`;
   const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params) });
@@ -597,12 +599,15 @@ async function startBotPolling() {
           if (update.message) await processTelegramMessage(update.message);
         }
       }
+      conflictCounter = 0;
     } catch (error) {
-      console.error('Ошибка polling:', error.message);
-      if (error.message && error.message.includes('409')) {
-        console.log('Конфликт polling (409). Ждём 15 секунд...');
-        await sleep(15000);
+      const isConflict = error.message && error.message.includes('409');
+      if (isConflict) {
+        conflictCounter++;
+        if (conflictCounter <= 3) console.log(`⚠️ Конфликт polling (409). Ждём 30 секунд... (попытка ${conflictCounter})`);
+        await sleep(30000);
       } else {
+        console.error('Ошибка polling:', error.message);
         await sleep(5000);
       }
     }
@@ -610,7 +615,7 @@ async function startBotPolling() {
   }
 }
 
-// ========== Новые эндпоинты: Стрелки, График по дням, Тур (3 дня) ==========
+// ========== НОВЫЕ: История позиций (стрелки ▲▼) ==========
 app.get('/api/standings-history', asyncHandler(async (req, res) => {
   const matchesData = await getSheetData('Matches', 'A:J');
   const predictionsData = await getSheetData('Predictions', 'A:Z');
@@ -636,6 +641,7 @@ app.get('/api/standings-history', asyncHandler(async (req, res) => {
   res.json({ previousPositions: calc(previousIds), currentPositions: calc(allIds) });
 }));
 
+// ========== НОВЫЕ: Динамика очков пользователя (график по дням) ==========
 app.get('/api/user-points-history/:userId', asyncHandler(async (req, res) => {
   const userId = String(req.params.userId || '').trim();
   if (!userId) return res.status(400).json({ error: 'userId required' });
@@ -663,6 +669,7 @@ app.get('/api/user-points-history/:userId', asyncHandler(async (req, res) => {
   res.json(history);
 }));
 
+// ========== НОВЫЕ: Турнирная таблица за последние 3 дня ==========
 app.get('/api/standings-last-round', asyncHandler(async (req, res) => {
   const matchesData = await getSheetData('Matches', 'A:J');
   const predictionsData = await getSheetData('Predictions', 'A:Z');
@@ -745,8 +752,7 @@ app.get('/api/matches', asyncHandler(async (req, res) => {
 app.get('/api/my-predictions', asyncHandler(async (req, res) => {
   const userId = req.query.userId ? String(req.query.userId).trim() : '';
   if (!userId) return res.status(400).json({ error: 'userId required' });
-  const result = await getUserPredictionsResponse(userId, req.query);
-  res.json(result);
+  res.json(await getUserPredictionsResponse(userId, req.query));
 }));
 
 app.get('/api/user-predictions/:userId', asyncHandler(async (req, res) => {
@@ -839,6 +845,7 @@ app.get('/api/match-odds/:matchId', asyncHandler(async (req, res) => {
   return res.json({ enabled: true, odds });
 }));
 
+// ========== Таблица с правильной сортировкой "Промахи" ==========
 app.get('/api/standings', asyncHandler(async (req, res) => {
   const usersData = await getSheetData('Users', 'A:Z');
   const users = usersData.filter(row => isDataRow(row, 'user_id'));
@@ -846,9 +853,7 @@ app.get('/api/standings', asyncHandler(async (req, res) => {
   const sortBy = String(req.query.sortBy || '').toLowerCase().trim();
   const requestedOrder = String(req.query.order || '').toLowerCase().trim();
   const sortableFields = { points: 'totalPoints', totalpoints: 'totalPoints', exact: 'exactScores', exactscores: 'exactScores', difference: 'goalDifference', goaldifference: 'goalDifference', draws: 'draws', outcomes: 'outcomes', misses: 'misses', successful: 'successfulPredictions', successfulpredictions: 'successfulPredictions' };
-  
   const hasActivity = user => (toNum(user.successfulPredictions, 0) + toNum(user.exactScores, 0) + toNum(user.goalDifference, 0) + toNum(user.draws, 0) + toNum(user.outcomes, 0) + toNum(user.misses, 0)) > 0;
-
   if (sortBy === 'misses') {
     const order = requestedOrder === 'desc' ? -1 : 1;
     table.sort((a, b) => {
