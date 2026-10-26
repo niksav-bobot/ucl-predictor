@@ -286,13 +286,19 @@ async function checkReferralAward(userId) {
   const referredBy = String(p[16] || '').trim();
   const awarded = String(p[17] || '').trim().toUpperCase() === 'TRUE';
   
-  if (referredBy && !awarded && toNum(p[5], 0) >= 20) {
-    const refResult = await awardFantiki(referredBy, 150, 'referral_bonus', uid, `referral|${referredBy}|${uid}`);
-    if (refResult.success) {
-      const idx = usersData.findIndex(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
-      if (idx !== -1) {
-        p[17] = 'TRUE';
-        await writeRow('Users', idx, p);
+  if (referredBy && !awarded) {
+    // Считаем количество сделанных прогнозов напрямую из листа Predictions
+    const predsData = await getSheetData('Predictions', 'A:K');
+    const predCount = predsData.filter(r => isDataRow(r, 'prediction_id') && String(r[1] || '').trim() === uid).length;
+
+    if (predCount >= 20) {
+      const refResult = await awardFantiki(referredBy, 150, 'referral_bonus', uid, `referral|${referredBy}|${uid}`);
+      if (refResult.success) {
+        const idx = usersData.findIndex(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
+        if (idx !== -1) {
+          p[17] = 'TRUE';
+          await writeRow('Users', idx, p);
+        }
       }
     }
   }
@@ -428,7 +434,7 @@ async function getDivisionsData() {
   return { divisions, divisionSize: DIVISION_SIZE, totalUsers: N, numDivisions, minUsersForDivisions: MIN_USERS_FOR_DIVISIONS, splittingNotYetActive: false };
 }
 
-// ========== Прогнозы: логика ==========
+// ========== Логика прогнозов ==========
 function getLatestPredictionMap(data) {
   const latest = new Map();
   data.forEach((row, idx) => {
@@ -529,6 +535,7 @@ function requireAdmin(req, res, next) {
 }
 const asyncHandler = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
+// ========== Команды и переводы ==========
 const teamTranslations = { 'Real Madrid CF': 'Реал Мадрид', 'FC Barcelona': 'Барселона', 'Manchester City FC': 'Манчестер Сити', 'Liverpool FC': 'Ливерпуль', 'FC Bayern München': 'Бавария', 'Paris Saint-Germain FC': 'ПСЖ', 'Juventus FC': 'Ювентус', 'AC Milan': 'Милан', 'Chelsea FC': 'Челси', 'Arsenal FC': 'Арсенал', 'Borussia Dortmund': 'Боруссия Дортмунд', 'Club Atlético de Madrid': 'Атлетико Мадрид', 'FC Internazionale Milano': 'Интер', 'SSC Napoli': 'Наполи', 'FC Porto': 'Порту', 'SL Benfica': 'Бенфика', 'AFC Ajax': 'Аякс', 'Olympique Lyonnais': 'Лион', 'AS Monaco FC': 'Монако', 'FC Red Bull Salzburg': 'Зальцбург', 'FK Shakhtar Donetsk': 'Шахтер', 'GNK Dinamo Zagreb': 'Динамо Загреб', 'Celtic FC': 'Селтик', 'Rangers FC': 'Рейнджерс', 'Club Brugge KV': 'Брюгге', 'Galatasaray SK': 'Галатасарай', 'Fenerbahçe SK': 'Фенербахче', 'Olympiacos FC': 'Олимпиакос', 'AEK Athens FC': 'АЕК', 'Maccabi Haifa FC': 'Маккаби Хайфа', 'FC København': 'Копенгаген', 'BSC Young Boys': 'Янг Бойз', 'FK Crvena Zvezda': 'Црвена Звезда', 'Racing Club de Lens': 'Ланс', 'Real Sociedad de Fútbol': 'Реал Сосьедад', 'PSV': 'ПСВ', 'Feyenoord Rotterdam': 'Фейеноорд', 'Sporting CP': 'Спортинг', 'Sporting Clube de Portugal': 'Спортинг', 'FC Viktoria Plzeň': 'Виктория Пльзень', 'Stade Brestois 29': 'Брест', 'VfB Stuttgart': 'Штутгарт', 'Aston Villa FC': 'Астон Вилла', 'Bologna FC 1909': 'Болонья', 'Girona FC': 'Жирона', 'RC Celta de Vigo': 'Сельта', 'Real Betis Balompié': 'Бетис', 'Sevilla FC': 'Севилья', 'Valencia CF': 'Валенсия', 'Lazio Roma': 'Лацио', 'Atalanta BC': 'Аталанта', 'AS Roma': 'Рома', 'Olympique de Marseille': 'Марсель', 'Lille OSC': 'Лилль', 'OGC Nice': 'Ницца', 'Stade Rennais FC': 'Ренн', 'RC Strasbourg Alsace': 'Страсбур', 'FC Nantes': 'Нант', 'SC Braga': 'Брага', 'RSC Anderlecht': 'Андерлехт', 'KRC Genk': 'Генк', 'Ferencvárosi TC': 'Ференцварош', 'Ludogorets Razgrad': 'Лудогорец', 'Qarabağ FK': 'Карабах', 'Sparta Praha': 'Спарта Прага', 'Slavia Praha': 'Славия Прага', 'SK Slavia Praha': 'Славия Прага', 'FC Basel 1893': 'Базель', 'Grasshopper Club Zürich': 'Грассхоппер', 'Manchester United FC': 'Манчестер Юнайтед', 'Villarreal CF': 'Вильярреал', 'PAE AEK': 'АЕК', 'LASK Linz': 'ЛАСК', 'Viking FK': 'Викинг', 'ŠK Slovan Bratislava': 'Слован Братислава', 'FK Bodø/Glimt': 'Будё-Глимт', 'Como 1907': 'Комо', 'RB Leipzig': 'РБ Лейпциг', 'Sabah FK': 'Сабах' };
 const teamSynonyms = { 'мс':'Манчестер Сити','ман сити':'Манчестер Сити','мю':'Манчестер Юнайтед','реал':'Реал Мадрид','реал мадрид':'Реал Мадрид','барса':'Барселона','барселона':'Барселона','бавария':'Бавария','дортмунд':'Боруссия Дортмунд','атлетико':'Атлетико Мадрид','интер':'Интер','наполи':'Наполи','псж':'ПСЖ','ливерпуль':'Ливерпуль','челси':'Челси','арсенал':'Арсенал','ювентус':'Ювентус','милан':'Милан','аякс':'Аякс','порту':'Порту','бенфика':'Бенфика','лион':'Лион','монако':'Монако','зальцбург':'Зальцбург','шахтер':'Шахтер','селтик':'Селтик','брюгге':'Брюгге','галатасарай':'Галатасарай','фенербахче':'Фенербахче','олимпиакос':'Олимпиакос','аек':'АЕК','копенгаген':'Копенгаген','янг бойз':'Янг Бойз','црвена звезда':'Црвена Звезда','ланс':'Ланс','реал сосьедад':'Реал Сосьедад','псв':'ПСВ','фейеноорд':'Фейеноорд','спортинг':'Спортинг','штутгарт':'Штутгарт','астон вилла':'Астон Вилла','болонья':'Болонья','жирона':'Жирона','сельта':'Сельта','бетис':'Бетис','севилья':'Севилья','валенсия':'Валенсия','лацио':'Лацио','аталанта':'Аталанта','рома':'Рома','марсель':'Марсель','лилль':'Лилль','ницца':'Ницца','ренн':'Ренн','нант':'Нант','брага':'Брага','андерлехт':'Андерлехт','генк':'Генк','ференцварош':'Ференцварош','лудогорец':'Лудогорец','карабах':'Карабах','базель':'Базель','вильярреал':'Вильярреал','ласк':'ЛАСК','викинг':'Викинг','слован братислава':'Слован Братислава','будё-глимт':'Будё-Глимт','комо':'Комо','рб лейпциг':'РБ Лейпциг','сабах':'Сабах' };
 const teamAliases = new Map();
@@ -616,6 +623,7 @@ function calculatePredictionFantiki(type, totalGoals, lvl) {
   return Math.round(base * (1 + getLevelBonus(lvl)));
 }
 
+// ========== DUELS ==========
 async function getUserActiveDuelsCount(userId) {
   const uid = String(userId).trim();
   const { Duels: ds, DuelBets: bs } = await batchGetSheets([{ sheet: 'Duels', range: 'A:I' }, { sheet: 'DuelBets', range: 'A:G' }]);
@@ -943,12 +951,15 @@ async function checkRoundPrizes(matchdayKey) {
   const dm = m.filter(r => isDataRow(r, 'match_id') && getMatchdayKey(r[4]) === matchdayKey);
   if (!dm.length) return null;
   if (!dm.every(r => ['finished','postponed','cancelled'].includes(String(r[5] || '').trim()))) return null;
+
   const b = await getSheetData('MatchdayBonuses', 'A:G');
   if (b.some(r => isDataRow(r, 'bonus_id') && String(r[1] || '').trim() === matchdayKey && String(r[2] || '').trim() === 'round_prize')) return null;
+
   const { Predictions: p } = await batchGetSheets([{ sheet: 'Predictions', range: 'A:K' }]);
   const ids = new Set(dm.map(r => String(r[0]).trim()));
   const byId = new Map(); dm.forEach(r => byId.set(String(r[0]).trim(), r));
   const lm = getLatestPredictionMap(p);
+  
   const pts = new Map();
   for (const it of lm.values()) {
     const row = p[it.idx];
@@ -965,26 +976,47 @@ async function checkRoundPrizes(matchdayKey) {
     if (!uid) continue;
     pts.set(uid, (pts.get(uid) || 0) + r.points);
   }
-  const sorted = [...pts.entries()].sort((a, b) => b[1] - a[1]);
-  const rewards = { 1: 100, 2: 60, 3: 30 };
+
+  const divData = await getDivisionsData();
   const prizes = new Map();
-  let pos = 1, i = 0;
-  while (i < sorted.length && pos <= 3) {
-    const val = sorted[i][1];
-    const grp = [];
-    while (i < sorted.length && sorted[i][1] === val) { grp.push(sorted[i][0]); i++; }
-    const amt = rewards[pos] || 0;
-    if (amt > 0) for (const uid of grp) prizes.set(uid, { place: pos, amount: amt });
-    pos += grp.length;
+
+  const rewards = { 1: 60, 2: 30, 3: 15 };
+
+  for (const div of divData.divisions) {
+    const divUsers = div.users
+      .map(u => ({ uid: u.userId, points: pts.get(u.userId) || 0 }))
+      .filter(u => u.points > 0)
+      .sort((a, b) => b.points - a.points);
+
+    let pos = 1, i = 0;
+    while (i < divUsers.length && pos <= 3) {
+      const val = divUsers[i].points;
+      const grp = [];
+      while (i < divUsers.length && divUsers[i].points === val) { grp.push(divUsers[i].uid); i++; }
+      const amt = rewards[pos] || 0;
+      if (amt > 0) {
+        for (const uid of grp) {
+          if (!prizes.has(uid)) prizes.set(uid, { place: pos, amount: amt, divName: div.name });
+        }
+      }
+      pos += grp.length;
+    }
   }
+
   let total = 0, awarded = 0;
   const rows = [];
-  for (const [uid, { place, amount }] of prizes) {
+  for (const [uid, { place, amount, divName }] of prizes) {
     const r = await awardFantiki(uid, amount, 'round_prize', matchdayKey, `round_prize|${matchdayKey}|${uid}`);
-    if (r.success) { total += amount; awarded++; rows.push([`bonus_prize_${matchdayKey}_${uid}`, matchdayKey, 'round_prize', uid, place, amount, new Date().toISOString()]); }
+    if (r.success) {
+      total += amount;
+      awarded++;
+      rows.push([`bonus_prize_${matchdayKey}_${uid}`, matchdayKey, 'round_prize', uid, place, amount, new Date().toISOString()]);
+    }
   }
+
   if (rows.length) await appendRows('MatchdayBonuses', rows);
   await appendRows('MatchdayBonuses', [[`bonus_prize_marker_${matchdayKey}`, matchdayKey, 'round_prize', '', '', total, new Date().toISOString()]]);
+  
   return { matchdayKey, awardedCount: awarded, totalAwarded: total };
 }
 
@@ -1356,6 +1388,7 @@ async function getUserPredictionsResponse(userId, query = {}) {
   return sortPredictionsResponse(r, query.sort);
 }
 
+// ========== Telegram ==========
 let telegramOffset = 0, conflictCounter = 0;
 async function callTelegram(method, params) {
   const url = `${TELEGRAM_API_BASE}/bot${BOT_TOKEN}/${method}`;
@@ -1456,6 +1489,8 @@ app.post(WEBHOOK_PATH, (req, res) => {
   res.status(200).json({ ok: true });
   if (req.body?.message) processTelegramMessage(req.body.message).catch(e => console.error('Webhook:', e.message));
 });
+
+// ========== API ==========
 
 app.get('/api/levels', (req, res) => res.json(LEVELS_DATA));
 

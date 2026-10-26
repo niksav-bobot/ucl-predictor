@@ -151,7 +151,17 @@ function openRulesModal() {
     <div class="rules-text">
       <p><strong>${COIN_SVG} Фантики</strong> — внутренняя валюта. Их дают за активность, а тратить можно в дуэлях. В конце сезона баланс обнуляется, но уровень и бейджи остаются.</p>
       
-      <h4>За прогнозы (после матча)</h4>
+      <h4>🏆 Как начисляются очки (в турнирную таблицу)</h4>
+      <p style="margin-bottom:6px">Очки определяют твоё место в таблице и дивизионе. Они начисляются после завершения матча:</p>
+      <ul>
+        <li><strong>5 очков</strong> — Точный счёт (угадан и исход, и разница, и голы)</li>
+        <li><strong>3 очка</strong> — Угадана ничья (например, поставил 1:1, а матч закончился 2:2 или 0:0)</li>
+        <li><strong>3 очка</strong> — Угадана разница мячей (например, поставил 2:0, а матч закончился 3:1)</li>
+        <li><strong>1 очко</strong> — Угадан только исход (например, поставил 2:0, а матч закончился 3:0 или 1:2)</li>
+        <li><strong>0 очков</strong> — Промах (не угадан даже исход)</li>
+      </ul>
+
+      <h4>💰 За что дают фантики (за прогнозы)</h4>
       <ul>
         <li>Исход угадан: <strong>+10</strong></li>
         <li>Разница угадана: <strong>+20</strong></li>
@@ -160,7 +170,7 @@ function openRulesModal() {
         <li>ТС в матче 8+ голов: <strong>+100</strong> (бонус редкости)</li>
       </ul>
 
-      <h4>За серию точных счетов за день</h4>
+      <h4>🔥 За серию точных счетов за день</h4>
       <ul>
         <li>2 ТС: <strong>+25</strong></li>
         <li>3 ТС: <strong>+75</strong></li>
@@ -168,10 +178,10 @@ function openRulesModal() {
         <li>5+ ТС: <strong>+300</strong></li>
       </ul>
 
-      <h4>За вход в день матча</h4>
+      <h4>📅 За вход в день матча</h4>
       <p>Заходишь в Mini App в день с матчами → <strong>+10</strong>. Один раз в день.</p>
 
-      <h4>Квесты на тур</h4>
+      <h4>📋 Квесты на тур</h4>
       <ul>
         <li>5 прогнозов в туре: <strong>+30</strong></li>
         <li>Все прогнозы тура: <strong>+50</strong></li>
@@ -179,30 +189,36 @@ function openRulesModal() {
         <li>3+ исхода за тур: <strong>+15</strong></li>
       </ul>
 
-      <h4>Призовые места в туре</h4>
-      <p>Топ-3 по очкам за день: 1-е — <strong>+100</strong>, 2-е — <strong>+60</strong>, 3-е — <strong>+30</strong>. При равенстве — все получают приз своего места.</p>
+      <h4>🏅 Призовые места в туре (по дивизионам)</h4>
+      <p>В каждом дивизионе есть свой топ-3 по очкам за игровой день:</p>
+      <ul>
+        <li>1-е место в дивизионе: <strong>+60</strong></li>
+        <li>2-е место в дивизионе: <strong>+30</strong></li>
+        <li>3-е место в дивизионе: <strong>+15</strong></li>
+      </ul>
+      <p>При равенстве очков — все получают приз своего места. Если у тебя 0 очков за тур, приз не даётся.</p>
 
-      <h4>Реферальная программа</h4>
-      <p>Пригласи друга по ссылке из профиля. Когда он сделает <strong>20 прогнозов</strong>, ты получишь <strong>+150</strong>.</p>
+      <h4>🎁 Реферальная программа</h4>
+      <p>Пригласи друга по ссылке из своего профиля. Когда он сделает <strong>20 прогнозов</strong>, ты получишь <strong>+150</strong>.</p>
 
-      <h4>Уровни (награда за сезон)</h4>
+      <h4>🎖 Уровни (за накопленные фантики)</h4>
       <ul>
         <li>Новичок (100+)</li>
-        <li>Прогнозист (500+) — <strong>+5%</strong> к наградам</li>
+        <li>Прогнозист (500+) — <strong>+5%</strong> к наградам за прогнозы</li>
         <li>Аналитик (1000+) — <strong>+10%</strong></li>
         <li>Снайпер (2000+) — <strong>+15%</strong></li>
         <li>Профи (5000+) — <strong>+25%</strong></li>
       </ul>
-      <p>Бонус уровня применяется только к наградам за прогнозы.</p>
 
-      <h4>Дуэли</h4>
-      <p>Создаёшь дуэль: счёт + ставка (10–500, кратно 5). Другой игрок вступает, ставит такой же счёт (не совпадающий) и такую же ставку. 1 угадал — забирает банк. 2+ угадали — делят. 0 — возврат всем.</p>
+      <h4>⚔️ Дуэли</h4>
+      <p>Создаёшь дуэль: счёт + ставка (10–500, кратно 5). Другой игрок вступает, ставит такой же счёт (не совпадающий) и такую же ставку. 1 угадал — забирает банк. 2+ угадали — делят поровну. 0 угадали — возврат всем.</p>
     </div>
   `;
   openModal('Правила', html);
 }
 
 async function showParticipantProfile(targetUserId, displayName) {
+  const isMe = targetUserId === String(userId);
   const [bal, badgesData, divInfo] = await Promise.all([
     apiJson(`/api/fantiki/balance/${encodeURIComponent(targetUserId)}`).catch(() => null),
     apiJson(`/api/season-titles/${encodeURIComponent(targetUserId)}`).catch(() => ({ badges: [] })),
@@ -235,11 +251,15 @@ async function showParticipantProfile(targetUserId, displayName) {
     </div>
     <button id="profile-all-preds" class="primary-button full-width">Все прогнозы</button>
     <button id="profile-chart" class="secondary-button full-width" style="margin-top:8px">📊 Динамика очков</button>
+    ${isMe ? `<button id="profile-referral" class="secondary-button full-width" style="margin-top:8px; border: 1px solid var(--success); color: var(--success);">🎁 Пригласить друга (+150)</button>` : ''}
   `);
 
   overlay.querySelector('#profile-level-click').onclick = showLevelsModal;
   overlay.querySelector('#profile-all-preds').onclick = () => { closeModal(); showParticipantPredictions(targetUserId, displayName, 'all'); };
   overlay.querySelector('#profile-chart').onclick = () => { closeModal(); showPointsChart(targetUserId, displayName); };
+  if (isMe) {
+    overlay.querySelector('#profile-referral').onclick = showReferralModal;
+  }
 }
 
 async function showLevelsModal() {
@@ -494,7 +514,11 @@ async function renderDivisionsView(app) {
     </tr></thead><tbody>`;
     div.users.forEach(u => {
       const isMe = u.userId === String(userId);
-      const cls = isMe ? 'division-me' : '';
+      let cls = isMe ? 'division-me' : '';
+      if (div.size >= 5) {
+        if (u.position <= 2) cls += ' zone-promotion';
+        else if (u.position > div.size - 2) cls += ' zone-relegation';
+      }
       const nameHtml = isMe ? `${escapeHtml(u.displayName)}<span class="division-mine-badge">вы</span>` : escapeHtml(u.displayName);
       html += `<tr class="${cls}">
         <td>${u.position}</td>
