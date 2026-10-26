@@ -12,6 +12,9 @@ const state = {
   today: null,
 };
 
+// SVG для КБП (для использования в JS)
+const COIN_SVG = `<svg class="coin-svg" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="width:16px;height:16px;display:inline-block;vertical-align:middle;"><circle cx="12" cy="12" r="10" fill="#1e293b" stroke="#f97316" stroke-width="2"/><path d="M12 2a10 10 0 0 0-7.07 17.07" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/><path d="M12 22a10 10 0 0 0 7.07-17.07" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/><text x="12" y="15.5" font-size="7" font-weight="bold" text-anchor="middle" fill="#f97316" font-family="sans-serif">КБП</text></svg>`;
+
 function escapeHtml(v) { return String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;'); }
 function formatDateTime(v) { const d = new Date(v); if (!Number.isFinite(d.getTime())) return '—'; return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }); }
 function formatDay(v) { const d = new Date(v); if (!Number.isFinite(d.getTime())) return 'Без даты'; return d.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }); }
@@ -31,6 +34,7 @@ const REASON_LABELS = {
   duel_stake: '⚔️ Ставка в дуэли',
   duel_win: '⚔️ Выигрыш в дуэли',
   duel_refund: '↩️ Возврат из дуэли',
+  referral_bonus: '🎁 Бонус за друга',
   admin_grant: '👑 Начисление',
 };
 
@@ -65,7 +69,6 @@ function showToast(message, type = 'info', ttl = 2500) {
   setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 0.3s'; setTimeout(() => el.remove(), 300); }, ttl);
 }
 
-// ===== Хедер =====
 async function refreshHeader() {
   if (!userId) return;
   try {
@@ -96,7 +99,6 @@ async function refreshHeader() {
   } catch (e) { console.error('refreshHeader:', e); }
 }
 
-// ===== Модалка баланса =====
 async function openBalanceModal() {
   const [bal, today, tx, levels] = await Promise.all([
     apiJson(`/api/fantiki/balance/${encodeURIComponent(userId)}`).catch(() => state.balance),
@@ -113,7 +115,7 @@ async function openBalanceModal() {
     const items = Object.entries(today.breakdown || {}).filter(([, v]) => v !== 0);
     todayHtml = `
       <div class="today-summary">
-        <div class="today-total">${fmt(today.total)} 🪙 <span class="muted" style="font-size:13px;font-weight:400">за ${today.date}</span></div>
+        <div class="today-total">${COIN_SVG} ${fmt(today.total)} <span class="muted" style="font-size:13px;font-weight:400">за ${today.date}</span></div>
         ${items.length ? `<ul class="today-breakdown">${items.map(([r, v]) => `<li><span>${REASON_LABELS[r] || escapeHtml(r)}</span><span class="${cls(v)}">${fmt(v)}</span></li>`).join('')}</ul>` : '<div class="muted" style="padding:4px 0">Начислений ещё нет</div>'}
       </div>`;
   } else {
@@ -122,7 +124,7 @@ async function openBalanceModal() {
 
   const levelsHtml = (levels || []).map(l => {
     const isCur = bal?.level === l.level;
-    return `<div class="level-row ${isCur ? 'level-current' : ''}"><span class="level-num">${l.level}</span><span class="level-name">${escapeHtml(l.name)}</span><span class="level-req">${l.min}+ 🪙</span><span class="level-bonus">${l.bonus > 0 ? `+${l.bonus}%` : '—'}</span></div>`;
+    return `<div class="level-row ${isCur ? 'level-current' : ''}"><span class="level-num">${l.level}</span><span class="level-name">${escapeHtml(l.name)}</span><span class="level-req">${l.min}+ ${COIN_SVG}</span><span class="level-bonus">${l.bonus > 0 ? `+${l.bonus}%` : '—'}</span></div>`;
   }).join('');
 
   const txHtml = tx.length
@@ -130,10 +132,10 @@ async function openBalanceModal() {
     : '<div class="muted">Транзакций пока нет</div>';
 
   openModal('Баланс фантиков', `
-    <div class="balance-total">Всего: <strong>${bal?.balance ?? '—'} 🪙</strong></div>
-    <div class="muted" style="margin-bottom:8px">${escapeHtml(bal?.levelName || 'Без уровня')} · за сезон: ${bal?.totalEarnedSeason ?? 0} 🪙</div>
+    <div class="balance-total">Всего: <strong>${bal?.balance ?? '—'} ${COIN_SVG}</strong></div>
+    <div class="muted" style="margin-bottom:8px">${escapeHtml(bal?.levelName || 'Без уровня')} · за сезон: ${bal?.totalEarnedSeason ?? 0} ${COIN_SVG}</div>
 
-    <h4 class="modal-section-title">Сегодня (сбрасывается через 4 ч после последнего матча)</h4>
+    <h4 class="modal-section-title">Сегодня (обнуляется при старте следующего игрового дня)</h4>
     ${todayHtml}
 
     <h4 class="modal-section-title">Уровни</h4>
@@ -142,6 +144,63 @@ async function openBalanceModal() {
     <h4 class="modal-section-title">Последние начисления</h4>
     ${txHtml}
   `);
+}
+
+// ===== Правила =====
+function openRulesModal() {
+  const html = `
+    <div class="rules-text">
+      <p><strong>${COIN_SVG} Фантики</strong> — внутренняя валюта. Их дают за активность, а тратить можно в дуэлях. В конце сезона баланс обнуляется, но уровень и бейджи остаются.</p>
+      
+      <h4>За прогнозы (после матча)</h4>
+      <ul>
+        <li>Исход угадан: <strong>+10</strong></li>
+        <li>Разница угадана: <strong>+20</strong></li>
+        <li>Точный счёт: <strong>+50</strong></li>
+        <li>ТС в матче 6–7 голов: <strong>+75</strong> (бонус редкости)</li>
+        <li>ТС в матче 8+ голов: <strong>+100</strong> (бонус редкости)</li>
+      </ul>
+
+      <h4>За серию точных счетов за день</h4>
+      <ul>
+        <li>2 ТС: <strong>+25</strong></li>
+        <li>3 ТС: <strong>+75</strong></li>
+        <li>4 ТС: <strong>+150</strong></li>
+        <li>5+ ТС: <strong>+300</strong></li>
+      </ul>
+
+      <h4>За вход в день матча</h4>
+      <p>Заходишь в Mini App в день с матчами → <strong>+10</strong>. Один раз в день.</p>
+
+      <h4>Квесты на тур</h4>
+      <ul>
+        <li>5 прогнозов в туре: <strong>+30</strong></li>
+        <li>Все прогнозы тура: <strong>+50</strong></li>
+        <li>Хотя бы 1 ТС за тур: <strong>+20</strong></li>
+        <li>3+ исхода за тур: <strong>+15</strong></li>
+      </ul>
+
+      <h4>Призовые места в туре</h4>
+      <p>Топ-3 по очкам за день: 1-е — <strong>+100</strong>, 2-е — <strong>+60</strong>, 3-е — <strong>+30</strong>. При равенстве — все получают приз своего места.</p>
+
+      <h4>Реферальная программа</h4>
+      <p>Пригласи друга по ссылке из профиля. Когда он сделает <strong>20 прогнозов</strong>, ты получишь <strong>+150</strong>.</p>
+
+      <h4>Уровни (награда за сезон)</h4>
+      <ul>
+        <li>Новичок (100+)</li>
+        <li>Прогнозист (500+) — <strong>+5%</strong> к наградам</li>
+        <li>Аналитик (1000+) — <strong>+10%</strong></li>
+        <li>Снайпер (2000+) — <strong>+15%</strong></li>
+        <li>Профи (5000+) — <strong>+25%</strong></li>
+      </ul>
+      <p>Бонус уровня применяется только к наградам за прогнозы.</p>
+
+      <h4>Дуэли</h4>
+      <p>Создаёшь дуэль: счёт + ставка (10–500, кратно 5). Другой игрок вступает, ставит такой же счёт (не совпадающий) и такую же ставку. 1 угадал — забирает банк. 2+ угадали — делят. 0 — возврат всем.</p>
+    </div>
+  `;
+  openModal('Правила', html);
 }
 
 // ===== Профиль участника =====
@@ -159,13 +218,13 @@ async function showParticipantProfile(targetUserId, displayName) {
 
   const overlay = openModal(displayName, `
     <div class="profile-section">
-      <div class="profile-balance">${bal?.balance ?? '—'} 🪙</div>
-      <div class="muted">Баланс · за сезон заработано ${bal?.totalEarnedSeason ?? 0} 🪙</div>
+      <div class="profile-balance">${bal?.balance ?? '—'} ${COIN_SVG}</div>
+      <div class="muted">Баланс · за сезон заработано ${bal?.totalEarnedSeason ?? 0} ${COIN_SVG}</div>
     </div>
     <div class="profile-level-click" id="profile-level-click">
       <div style="font-weight:600;margin-bottom:4px">${escapeHtml(bal?.levelName || 'Без уровня')} <span class="muted" style="font-weight:400">· ур. ${bal?.level ?? 0}</span></div>
       <div class="muted">Бонус к наградам: ${lvlBonus}</div>
-      ${bal?.nextLevelAt ? `<div class="muted">До следующего уровня: ${bal.totalEarnedSeason} / ${bal.nextLevelAt} 🪙</div>` : '<div class="muted">Максимальный уровень</div>'}
+      ${bal?.nextLevelAt ? `<div class="muted">До следующего уровня: ${bal.totalEarnedSeason} / ${bal.nextLevelAt} ${COIN_SVG}</div>` : '<div class="muted">Максимальный уровень</div>'}
       <div class="muted" style="margin-top:6px;font-size:11px">Нажмите, чтобы увидеть все уровни</div>
     </div>
     <div class="profile-section">
@@ -186,9 +245,43 @@ async function showLevelsModal() {
   const cur = state.balance?.level ?? 0;
   const html = (levels || []).map(l => {
     const isCur = cur === l.level;
-    return `<div class="level-row ${isCur ? 'level-current' : ''}"><span class="level-num">${l.level}</span><span class="level-name">${escapeHtml(l.name)}</span><span class="level-req">${l.min}+ 🪙</span><span class="level-bonus">${l.bonus > 0 ? `+${l.bonus}%` : '—'}</span></div>`;
+    return `<div class="level-row ${isCur ? 'level-current' : ''}"><span class="level-num">${l.level}</span><span class="level-name">${escapeHtml(l.name)}</span><span class="level-req">${l.min}+ ${COIN_SVG}</span><span class="level-bonus">${l.bonus > 0 ? `+${l.bonus}%` : '—'}</span></div>`;
   }).join('');
   openModal('Уровни', `<div class="muted" style="margin-bottom:12px">Уровень повышается по мере накопления фантиков за сезон. Бонус прибавляется к наградам за прогнозы.</div><div class="levels-list">${html}</div>`);
+}
+
+// ===== Рефералка =====
+async function showReferralModal() {
+  try {
+    const info = await apiJson(`/api/referral/info/${encodeURIComponent(userId)}`);
+    const html = `
+      <div class="muted" style="margin-bottom:12px;line-height:1.5">
+        Пригласи друга. Когда он сделает <strong>20 прогнозов</strong>, ты получишь <strong>+150 ${COIN_SVG}</strong>.
+      </div>
+      <div class="muted" style="margin-bottom:8px">Твоя ссылка:</div>
+      <div class="ref-link-box">
+        <input type="text" class="ref-link-input" id="ref-link-input" readonly value="${escapeHtml(info.link)}">
+        <button class="primary-button" id="ref-copy-btn">Копировать</button>
+      </div>
+      <img src="${info.qrUrl}" class="ref-qr" alt="QR-код для приглашения">
+      <div class="muted" style="text-align:center;margin-bottom:12px">Наведи камеру или поделись ссылкой</div>
+      <div style="display:flex;justify-content:space-between;background:rgba(255,255,255,0.04);padding:12px;border-radius:10px">
+        <div><strong>${info.completed}</strong> <span class="muted">завершили</span></div>
+        <div><strong>${info.total}</strong> <span class="muted">всего</span></div>
+      </div>
+      <button class="secondary-button full-width" style="margin-top:16px" id="ref-share-btn">Поделиться в Telegram</button>
+    `;
+    const overlay = openModal('Пригласить друга', html);
+    
+    overlay.querySelector('#ref-copy-btn').onclick = () => {
+      navigator.clipboard.writeText(info.link).then(() => showToast('Ссылка скопирована', 'success'));
+    };
+    overlay.querySelector('#ref-share-btn').onclick = () => {
+      const text = encodeURIComponent('Присоединяйся к прогнозам на ЛЧ! ');
+      const url = `https://t.me/share/url?url=${encodeURIComponent(info.link)}&text=${text}`;
+      tg.openTelegramLink(url);
+    };
+  } catch (e) { showToast('Ошибка загрузки рефералки: ' + e.message, 'error'); }
 }
 
 // ===== Auth / daily login =====
@@ -200,7 +293,7 @@ async function tryDailyLogin() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ initData, userId: String(userId) }),
     });
-    if (r.success) { showToast(`+${r.amount} 🪙 за вход`, 'success'); await refreshHeader(); }
+    if (r.success) { showToast(`+${r.amount} за вход`, 'success'); await refreshHeader(); }
   } catch { /* молча */ }
 }
 
@@ -214,7 +307,6 @@ async function auth() {
   } catch (error) { document.getElementById('app').innerHTML = `<div class="empty-state error">${escapeHtml(error.message)}</div>`; }
 }
 
-// ===== Навигация =====
 function setActiveNav(name) {
   document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
   const btn = document.getElementById(`nav-${name}`);
@@ -338,7 +430,7 @@ async function showAllPredictions(match) {
 // ===== Мои прогнозы =====
 function predictionCardHtml(p) {
   const f = p.status === 'finished', t = typeLabel(p.prediction_type);
-  return `<div class="prediction-item ${p.prediction_type === 'exact' ? 'prediction-exact' : ''}"><div><strong>${escapeHtml(p.home_team)}</strong> vs <strong>${escapeHtml(p.away_team)}</strong></div><div class="muted">${escapeHtml(formatDateTime(p.kickoff_utc))}</div><div>Прогноз: <strong>${p.predicted_home ?? '-'} - ${p.predicted_away ?? '-'}</strong></div>${f ? `<div>Счёт: <strong>${p.home_score ?? '-'} - ${p.away_score ?? '-'}</strong></div>` : ''}${f ? `<div class="result-line">${t ? `${escapeHtml(t)} ·` : ''}<strong>${p.points} очк.</strong>${p.fantiki_awarded ? ` · +${p.fantiki_awarded} 🪙` : ''}</div>` : '<div class="muted">Матч ещё не завершён</div>'}</div>`;
+  return `<div class="prediction-item ${p.prediction_type === 'exact' ? 'prediction-exact' : ''}"><div><strong>${escapeHtml(p.home_team)}</strong> vs <strong>${escapeHtml(p.away_team)}</strong></div><div class="muted">${escapeHtml(formatDateTime(p.kickoff_utc))}</div><div>Прогноз: <strong>${p.predicted_home ?? '-'} - ${p.predicted_away ?? '-'}</strong></div>${f ? `<div>Счёт: <strong>${p.home_score ?? '-'} - ${p.away_score ?? '-'}</strong></div>` : ''}${f ? `<div class="result-line">${t ? `${escapeHtml(t)} ·` : ''}<strong>${p.points} очк.</strong>${p.fantiki_awarded ? ` · +${p.fantiki_awarded} ${COIN_SVG}` : ''}</div>` : '<div class="muted">Матч ещё не завершён</div>'}</div>`;
 }
 
 async function loadMyPredictions(filter = state.myPredictionFilter) {
@@ -464,7 +556,7 @@ function duelCardHtml(duel, { mine = false } = {}) {
     myBet = `<div class="duel-my-bet">Ваш прогноз: <strong>${duel.my_bet.predictedHome}:${duel.my_bet.predictedAway}</strong>${res !== 'pending' ? ` · <span class="${cls}">${lbl}</span>` : ''}</div>`;
   }
   const score = duel.match_status === 'finished' && duel.home_score !== null ? `<div class="duel-meta">Счёт: <strong>${duel.home_score}:${duel.away_score}</strong></div>` : '';
-  return `<div class="duel-card"><div class="duel-header"><div class="duel-teams">${escapeHtml(duel.home_team)} — ${escapeHtml(duel.away_team)}</div><span class="duel-stake">${duel.stake} 🪙</span></div><div class="duel-meta">${escapeHtml(formatDateTime(duel.kickoff_utc))} · ${escapeHtml(stLbl[duel.status] || duel.status)}</div>${score}<div class="duel-participants">Участников: ${duel.participants_count} · Банк: ${duel.pot} 🪙</div><div class="duel-participants">${participantsList || 'Пока никого'}</div>${myBet}${actions.length ? `<div class="duel-actions">${actions.join('')}</div>` : ''}</div>`;
+  return `<div class="duel-card"><div class="duel-header"><div class="duel-teams">${escapeHtml(duel.home_team)} — ${escapeHtml(duel.away_team)}</div><span class="duel-stake">${duel.stake} ${COIN_SVG}</span></div><div class="duel-meta">${escapeHtml(formatDateTime(duel.kickoff_utc))} · ${escapeHtml(stLbl[duel.status] || duel.status)}</div>${score}<div class="duel-participants">Участников: ${duel.participants_count} · Банк: ${duel.pot} ${COIN_SVG}</div><div class="duel-participants">${participantsList || 'Пока никого'}</div>${myBet}${actions.length ? `<div class="duel-actions">${actions.join('')}</div>` : ''}</div>`;
 }
 
 async function loadDuels(view = state.duelsView) {
@@ -517,7 +609,7 @@ async function submitCreateDuel(o) {
   const b = o.querySelector('#duel-submit'); b.disabled = true; b.textContent = 'Создание...';
   try {
     const r = await apiJson('/api/duels/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData, userId: String(userId), matchId, predictedHome: ph, predictedAway: pa, stake }) });
-    if (r.success) { closeModal(); tg.HapticFeedback?.notificationOccurred?.('success'); showToast(`Дуэль создана. Ставка ${stake} 🪙`, 'success'); await refreshHeader(); await loadDuels(); }
+    if (r.success) { closeModal(); tg.HapticFeedback?.notificationOccurred?.('success'); showToast(`Дуэль создана. Ставка ${stake}`, 'success'); await refreshHeader(); await loadDuels(); }
     else { showToast(r.error || 'Ошибка', 'error'); b.disabled = false; b.textContent = 'Создать дуэль'; }
   } catch (e) { showToast(e.message, 'error'); b.disabled = false; b.textContent = 'Создать дуэль'; }
 }
@@ -525,7 +617,7 @@ async function submitCreateDuel(o) {
 function openJoinDuelModal(duel) {
   if (!duel) return;
   const occupied = duel.participants.map(p => `${p.predictedHome}:${p.predictedAway}`).join(', ');
-  const o = openModal('Вступить', `<div>${escapeHtml(duel.home_team)} — ${escapeHtml(duel.away_team)}</div><div class="muted" style="margin:10px 0">Ставка: <strong>${duel.stake} 🪙</strong> · Банк: ${duel.pot} 🪙</div><div class="muted" style="margin-bottom:10px">Занятые: ${occupied}</div><label class="form-label">Ваш прогноз (≠ чужим)</label><div class="score-inputs"><input type="number" id="duel-ph" min="0" max="20" value="1" class="form-input"><span class="score-separator">:</span><input type="number" id="duel-pa" min="0" max="20" value="0" class="form-input"></div><button id="duel-submit" class="primary-button full-width">Вступить за ${duel.stake} 🪙</button>`);
+  const o = openModal('Вступить', `<div>${escapeHtml(duel.home_team)} — ${escapeHtml(duel.away_team)}</div><div class="muted" style="margin:10px 0">Ставка: <strong>${duel.stake} ${COIN_SVG}</strong> · Банк: ${duel.pot} ${COIN_SVG}</div><div class="muted" style="margin-bottom:10px">Занятые: ${occupied}</div><label class="form-label">Ваш прогноз (≠ чужим)</label><div class="score-inputs"><input type="number" id="duel-ph" min="0" max="20" value="1" class="form-input"><span class="score-separator">:</span><input type="number" id="duel-pa" min="0" max="20" value="0" class="form-input"></div><button id="duel-submit" class="primary-button full-width">Вступить за ${duel.stake} ${COIN_SVG}</button>`);
   o.querySelector('#duel-submit').onclick = () => submitJoinDuel(duel, o);
 }
 
@@ -537,7 +629,7 @@ async function submitJoinDuel(duel, o) {
   const b = o.querySelector('#duel-submit'); b.disabled = true; b.textContent = 'Вступление...';
   try {
     const r = await apiJson(`/api/duels/join/${encodeURIComponent(duel.duel_id)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData, userId: String(userId), predictedHome: ph, predictedAway: pa }) });
-    if (r.success) { closeModal(); tg.HapticFeedback?.notificationOccurred?.('success'); showToast(`Вступили. Ставка ${duel.stake} 🪙`, 'success'); await refreshHeader(); await loadDuels(); }
+    if (r.success) { closeModal(); tg.HapticFeedback?.notificationOccurred?.('success'); showToast(`Вступили. Ставка ${duel.stake}`, 'success'); await refreshHeader(); await loadDuels(); }
     else { showToast(r.error || 'Ошибка', 'error'); b.disabled = false; b.textContent = 'Вступить'; }
   } catch (e) { showToast(e.message, 'error'); b.disabled = false; b.textContent = 'Вступить'; }
 }
@@ -553,6 +645,7 @@ async function cancelDuel(duelId) {
 
 // ===== Навигация =====
 document.getElementById('header-clickable').addEventListener('click', openBalanceModal);
+document.getElementById('rules-btn').addEventListener('click', openRulesModal);
 document.getElementById('nav-matches').addEventListener('click', () => loadMatches());
 document.getElementById('nav-my-predictions').addEventListener('click', () => loadMyPredictions('all'));
 document.getElementById('nav-standings').addEventListener('click', () => { state.standingsSort = { sortBy: '', order: '' }; loadStandings('', ''); });

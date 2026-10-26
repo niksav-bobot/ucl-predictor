@@ -6,18 +6,21 @@
   <title>UCL Predictor</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
-    :root { --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --muted: #94a3b8; --primary: #3b82f6; --success: #10b981; --danger: #ef4444; --border: #334155; }
+    :root { --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --muted: #94a3b8; --primary: #3b82f6; --success: #10b981; --danger: #ef4444; --border: #334155; --kb-orange: #f97316; }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
     body { background: var(--bg); color: var(--text); padding-bottom: 90px; }
-    .header { position: sticky; top: 0; background: rgba(15,23,42,0.95); backdrop-filter: blur(8px); padding: 10px 16px; display: flex; justify-content: flex-end; align-items: center; border-bottom: 1px solid var(--border); z-index: 90; }
+    .header { position: sticky; top: 0; background: rgba(15,23,42,0.95); backdrop-filter: blur(8px); padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); z-index: 90; }
+    .header-left { display: flex; align-items: center; gap: 8px; }
     .header-balance { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 700; padding: 8px 14px; background: rgba(59,130,246,0.15); border-radius: 22px; border: 1px solid rgba(59,130,246,0.3); cursor: pointer; transition: background 0.2s; }
     .header-balance:hover { background: rgba(59,130,246,0.25); }
-    .header-balance .coin { font-size: 15px; }
+    .coin-svg { width: 18px; height: 18px; display: inline-block; vertical-align: middle; }
     .header-balance .today-amount { font-weight: 700; }
     .header-balance .today-amount.pos { color: var(--success); }
     .header-balance .today-amount.neg { color: var(--danger); }
     .header-balance .today-amount.zero { color: var(--muted); }
     .level-badge { font-size: 10px; color: var(--muted); padding-left: 8px; border-left: 1px solid var(--border); font-weight: 500; text-transform: uppercase; letter-spacing: 0.3px; }
+    .icon-btn { background: none; border: none; color: var(--muted); cursor: pointer; padding: 8px; border-radius: 10px; display: flex; align-items: center; justify-content: center; transition: background 0.2s; }
+    .icon-btn:hover { background: rgba(255,255,255,0.1); color: var(--text); }
     .nav-bar { position: fixed; bottom: 0; left: 0; right: 0; background: var(--card); display: flex; justify-content: space-around; align-items: center; padding: 8px 0 env(safe-area-inset-bottom); border-top: 1px solid var(--border); z-index: 100; }
     .nav-item { background: none; border: none; color: var(--muted); padding: 8px 20px; border-radius: 10px; cursor: pointer; transition: color 0.2s, background 0.2s; display: flex; align-items: center; justify-content: center; }
     .nav-item.active { color: var(--primary); background: rgba(59,130,246,0.12); }
@@ -83,12 +86,10 @@
     .odds-line { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; margin-bottom: 2px; }
     .odds-item { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 8px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.08); font-size: 12px; color: #fff; }
     .odds-item strong { color: var(--success); font-size: 13px; }
-
     .form-label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 6px; text-transform: uppercase; letter-spacing: 0.3px; font-weight: 600; }
     .form-input { width: 100%; padding: 10px 12px; font-size: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); }
     .form-input:focus { outline: none; border-color: var(--primary); }
     select.form-input { appearance: none; }
-
     .duel-tabs { display: flex; gap: 4px; background: rgba(255,255,255,0.05); padding: 4px; border-radius: 10px; margin-bottom: 16px; }
     .duel-tab { flex: 1; background: none; border: none; color: var(--muted); padding: 8px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; }
     .duel-tab.active { background: var(--primary); color: white; }
@@ -104,15 +105,11 @@
     .duel-result-winner { color: var(--success); font-weight: 700; }
     .duel-result-loser { color: var(--danger); }
     .duel-result-refunded { color: var(--muted); }
-
-    /* Тосты */
     .toast-container { position: fixed; top: 70px; left: 50%; transform: translateX(-50%); z-index: 2000; display: flex; flex-direction: column; gap: 8px; pointer-events: none; max-width: 90vw; }
     .toast { background: var(--card); border: 1px solid var(--border); padding: 10px 16px; border-radius: 10px; font-size: 13px; color: var(--text); box-shadow: 0 4px 20px rgba(0,0,0,0.4); animation: toast-in 0.2s ease; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .toast.success { border-color: var(--success); color: var(--success); }
     .toast.error { border-color: var(--danger); color: var(--danger); }
     @keyframes toast-in { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
-
-    /* Баланс / уровни / транзакции */
     .balance-total { font-size: 18px; margin-bottom: 4px; }
     .modal-section-title { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin: 20px 0 10px; font-weight: 600; }
     .modal-section-title:first-child { margin-top: 0; }
@@ -132,8 +129,6 @@
     .tx-list li:last-child { border-bottom: none; }
     .tx-list li .tx-sub { grid-column: 1 / -1; font-size: 11px; color: var(--muted); margin-top: 2px; }
     .tx-amount { font-weight: 600; }
-
-    /* Профиль */
     .profile-section { padding: 12px 0; border-bottom: 1px solid var(--border); }
     .profile-section:first-child { padding-top: 0; }
     .profile-section:last-of-type { border-bottom: none; }
@@ -142,14 +137,37 @@
     .profile-level-click:hover { background: rgba(255,255,255,0.08); }
     .profile-badges { display: flex; flex-wrap: wrap; gap: 6px; }
     .profile-badge { background: rgba(59,130,246,0.15); color: var(--primary); padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 500; }
+    .ref-link-box { display: flex; gap: 8px; margin-top: 10px; }
+    .ref-link-input { flex: 1; padding: 10px; font-size: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); }
+    .ref-qr { width: 100%; max-width: 200px; margin: 12px auto; display: block; border-radius: 8px; }
+    .rules-text { line-height: 1.5; font-size: 14px; }
+    .rules-text h4 { color: var(--kb-orange); margin: 16px 0 8px; font-size: 15px; }
+    .rules-text p { margin-bottom: 8px; }
+    .rules-text ul { margin-left: 18px; margin-bottom: 8px; }
+    .rules-text li { margin-bottom: 4px; }
   </style>
 </head>
 <body>
   <header class="header">
-    <div class="header-balance" id="header-clickable" title="Нажмите, чтобы увидеть все начисления">
-      <span class="coin">🪙</span>
-      <span id="today-value" class="today-amount zero">—</span>
-      <span class="level-badge" id="level-badge" style="display:none"></span>
+    <div class="header-left">
+      <button class="icon-btn" id="rules-btn" title="Правила">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"></circle>
+          <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+          <line x1="12" y1="17" x2="12.01" y2="17"></line>
+        </svg>
+      </button>
+      <div class="header-balance" id="header-clickable" title="Нажмите, чтобы увидеть все начисления">
+        <!-- SVG Логотип КБП (стилизованный под фантик) -->
+        <svg class="coin-svg" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="12" cy="12" r="10" fill="#1e293b" stroke="#f97316" stroke-width="2"/>
+          <path d="M12 2a10 10 0 0 0-7.07 17.07" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>
+          <path d="M12 22a10 10 0 0 0 7.07-17.07" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>
+          <text x="12" y="15.5" font-size="7" font-weight="bold" text-anchor="middle" fill="#f97316" font-family="sans-serif">КБП</text>
+        </svg>
+        <span id="today-value" class="today-amount zero">—</span>
+        <span class="level-badge" id="level-badge" style="display:none"></span>
+      </div>
     </div>
   </header>
   <div id="app"></div>
