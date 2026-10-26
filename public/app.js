@@ -219,13 +219,26 @@ function openRulesModal() {
 
 async function showParticipantProfile(targetUserId, displayName) {
   const isMe = targetUserId === String(userId);
-  const [bal, badgesData, divInfo] = await Promise.all([
+  const [bal, badgesData, divInfo, statsData] = await Promise.all([
     apiJson(`/api/fantiki/balance/${encodeURIComponent(targetUserId)}`).catch(() => null),
     apiJson(`/api/season-titles/${encodeURIComponent(targetUserId)}`).catch(() => ({ badges: [] })),
     apiJson(`/api/standings/user-division/${encodeURIComponent(targetUserId)}`).catch(() => null),
+    apiJson(`/api/user-stats/${encodeURIComponent(targetUserId)}`).catch(() => null),
   ]);
   const badges = (badgesData?.badges || []);
   const lvlBonus = bal?.levelBonus ? `+${Math.round(bal.levelBonus * 100)}%` : '—';
+
+  let statsHtml = '';
+  if (statsData && (statsData.favTeam || statsData.worstTeam)) {
+    statsHtml = '<div class="profile-section"><h4 class="modal-section-title" style="margin-top:0">Статистика</h4>';
+    if (statsData.favTeam) {
+      statsHtml += `<div style="margin-bottom:8px; font-size:13px">🔥 Любимая команда: <strong>${escapeHtml(statsData.favTeam.name)}</strong> <span class="muted">(${Math.round(statsData.favTeam.rate * 100)}% успеха, ${statsData.favTeam.total} матчей)</span></div>`;
+    }
+    if (statsData.worstTeam) {
+      statsHtml += `<div style="font-size:13px">💩 Не везет с: <strong>${escapeHtml(statsData.worstTeam.name)}</strong> <span class="muted">(${Math.round(statsData.worstTeam.rate * 100)}% успеха, ${statsData.worstTeam.total} матчей)</span></div>`;
+    }
+    statsHtml += '</div>';
+  }
 
   const badgesHtml = badges.length
     ? `<div class="profile-badges">${badges.map(b => `<span class="profile-badge">${escapeHtml(b.name)}</span>`).join('')}</div>`
@@ -245,18 +258,24 @@ async function showParticipantProfile(targetUserId, displayName) {
       ${bal?.nextLevelAt ? `<div class="muted">До следующего уровня: ${bal.totalEarnedSeason} / ${bal.nextLevelAt} ${COIN_SVG}</div>` : '<div class="muted">Максимальный уровень</div>'}
       <div class="muted" style="margin-top:6px;font-size:11px">Нажмите, чтобы увидеть все уровни</div>
     </div>
+    ${statsHtml}
     <div class="profile-section">
       <h4 class="modal-section-title" style="margin-top:0">Бейджи</h4>
       ${badgesHtml}
     </div>
     <button id="profile-all-preds" class="primary-button full-width">Все прогнозы</button>
     <button id="profile-chart" class="secondary-button full-width" style="margin-top:8px">📊 Динамика очков</button>
+    ${!isMe ? `<button id="profile-h2h" class="secondary-button full-width" style="margin-top:8px; border: 1px solid var(--primary); color: var(--primary);">⚔️ Сравнить с собой</button>` : ''}
     ${isMe ? `<button id="profile-referral" class="secondary-button full-width" style="margin-top:8px; border: 1px solid var(--success); color: var(--success);">🎁 Пригласить друга (+150)</button>` : ''}
   `);
 
   overlay.querySelector('#profile-level-click').onclick = showLevelsModal;
   overlay.querySelector('#profile-all-preds').onclick = () => { closeModal(); showParticipantPredictions(targetUserId, displayName, 'all'); };
   overlay.querySelector('#profile-chart').onclick = () => { closeModal(); showPointsChart(targetUserId, displayName); };
+  
+  if (!isMe) {
+    overlay.querySelector('#profile-h2h').onclick = () => showH2HModal(targetUserId, displayName);
+  }
   if (isMe) {
     overlay.querySelector('#profile-referral').onclick = showReferralModal;
   }
@@ -303,6 +322,43 @@ async function showReferralModal() {
       tg.openTelegramLink(url);
     };
   } catch (e) { showToast('Ошибка загрузки рефералки: ' + e.message, 'error'); }
+}
+
+async function showH2HModal(otherUserId, otherName) {
+  try {
+    const data = await apiJson(`/api/h2h/${encodeURIComponent(userId)}/${encodeURIComponent(otherUserId)}`);
+    const isDrawMatches = data.matches.u1Points === data.matches.u2Points;
+    const isDrawDuels = data.duels.u1Wins === data.duels.u2Wins;
+
+    const html = `
+      <div style="display:flex; justify-content:space-between; text-align:center; margin-bottom:20px; background:rgba(255,255,255,0.05); padding:16px; border-radius:12px;">
+        <div style="flex:1">
+          <div style="font-size:16px; font-weight:700; color:var(--primary); margin-bottom:8px;">Вы</div>
+          <div style="font-size:24px; font-weight:700;">${data.matches.u1Points}</div>
+          <div class="muted" style="font-size:11px;">очков в общих матчах</div>
+          <div style="margin-top:8px; font-size:13px;">${data.matches.u1Exact} ТС</div>
+        </div>
+        <div style="display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:700; color:var(--muted);">VS</div>
+        <div style="flex:1">
+          <div style="font-size:16px; font-weight:700; color:var(--danger); margin-bottom:8px;">${escapeHtml(otherName)}</div>
+          <div style="font-size:24px; font-weight:700;">${data.matches.u2Points}</div>
+          <div class="muted" style="font-size:11px;">очков в общих матчах</div>
+          <div style="margin-top:8px; font-size:13px;">${data.matches.u2Exact} ТС</div>
+        </div>
+      </div>
+
+      <div class="modal-section-title">Общие матчи (${data.matches.count})</div>
+      <div style="text-align:center; margin-bottom:16px; font-size:14px; font-weight:600; color:${isDrawMatches ? 'var(--muted)' : (data.matches.u1Points > data.matches.u2Points ? 'var(--success)' : 'var(--danger)')}">
+        ${data.matches.count === 0 ? 'Нет общих матчей' : (isDrawMatches ? 'Ничья по очкам' : (data.matches.u1Points > data.matches.u2Points ? 'Вы впереди' : 'Соперник впереди'))}
+      </div>
+
+      <div class="modal-section-title">Дуэли (${data.duels.count})</div>
+      <div style="text-align:center; font-size:14px; font-weight:600; color:${isDrawDuels ? 'var(--muted)' : (data.duels.u1Wins > data.duels.u2Wins ? 'var(--success)' : 'var(--danger)')}">
+        ${data.duels.count === 0 ? 'Дуэлей не было' : `Вы выиграли ${data.duels.u1Wins} : ${data.duels.u2Wins}`}
+      </div>
+    `;
+    openModal(`⚔️ Вы vs ${otherName}`, html);
+  } catch (e) { showToast('Ошибка загрузки H2H: ' + e.message, 'error'); }
 }
 
 async function tryDailyLogin() {

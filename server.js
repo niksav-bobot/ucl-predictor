@@ -287,7 +287,6 @@ async function checkReferralAward(userId) {
   const awarded = String(p[17] || '').trim().toUpperCase() === 'TRUE';
   
   if (referredBy && !awarded) {
-    // Считаем количество сделанных прогнозов напрямую из листа Predictions
     const predsData = await getSheetData('Predictions', 'A:K');
     const predCount = predsData.filter(r => isDataRow(r, 'prediction_id') && String(r[1] || '').trim() === uid).length;
 
@@ -361,7 +360,6 @@ async function getTodayBalance(userId) {
   return { date: currentMatchday, total, breakdown, count: dayTx.length };
 }
 
-// ========== Дивизионы ==========
 const DIVISION_SIZE = Number(process.env.DIVISION_SIZE || 10);
 const MIN_USERS_FOR_DIVISIONS = Number(process.env.MIN_USERS_FOR_DIVISIONS || 20);
 const DIVISION_NAMES = ['💎 Платина', '🥇 Золото', '🥈 Серебро', '🥉 Бронза', 'Лига 5', 'Лига 6', 'Лига 7', 'Лига 8', 'Лига 9', 'Лига 10'];
@@ -434,7 +432,6 @@ async function getDivisionsData() {
   return { divisions, divisionSize: DIVISION_SIZE, totalUsers: N, numDivisions, minUsersForDivisions: MIN_USERS_FOR_DIVISIONS, splittingNotYetActive: false };
 }
 
-// ========== Логика прогнозов ==========
 function getLatestPredictionMap(data) {
   const latest = new Map();
   data.forEach((row, idx) => {
@@ -535,7 +532,6 @@ function requireAdmin(req, res, next) {
 }
 const asyncHandler = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-// ========== Команды и переводы ==========
 const teamTranslations = { 'Real Madrid CF': 'Реал Мадрид', 'FC Barcelona': 'Барселона', 'Manchester City FC': 'Манчестер Сити', 'Liverpool FC': 'Ливерпуль', 'FC Bayern München': 'Бавария', 'Paris Saint-Germain FC': 'ПСЖ', 'Juventus FC': 'Ювентус', 'AC Milan': 'Милан', 'Chelsea FC': 'Челси', 'Arsenal FC': 'Арсенал', 'Borussia Dortmund': 'Боруссия Дортмунд', 'Club Atlético de Madrid': 'Атлетико Мадрид', 'FC Internazionale Milano': 'Интер', 'SSC Napoli': 'Наполи', 'FC Porto': 'Порту', 'SL Benfica': 'Бенфика', 'AFC Ajax': 'Аякс', 'Olympique Lyonnais': 'Лион', 'AS Monaco FC': 'Монако', 'FC Red Bull Salzburg': 'Зальцбург', 'FK Shakhtar Donetsk': 'Шахтер', 'GNK Dinamo Zagreb': 'Динамо Загреб', 'Celtic FC': 'Селтик', 'Rangers FC': 'Рейнджерс', 'Club Brugge KV': 'Брюгге', 'Galatasaray SK': 'Галатасарай', 'Fenerbahçe SK': 'Фенербахче', 'Olympiacos FC': 'Олимпиакос', 'AEK Athens FC': 'АЕК', 'Maccabi Haifa FC': 'Маккаби Хайфа', 'FC København': 'Копенгаген', 'BSC Young Boys': 'Янг Бойз', 'FK Crvena Zvezda': 'Црвена Звезда', 'Racing Club de Lens': 'Ланс', 'Real Sociedad de Fútbol': 'Реал Сосьедад', 'PSV': 'ПСВ', 'Feyenoord Rotterdam': 'Фейеноорд', 'Sporting CP': 'Спортинг', 'Sporting Clube de Portugal': 'Спортинг', 'FC Viktoria Plzeň': 'Виктория Пльзень', 'Stade Brestois 29': 'Брест', 'VfB Stuttgart': 'Штутгарт', 'Aston Villa FC': 'Астон Вилла', 'Bologna FC 1909': 'Болонья', 'Girona FC': 'Жирона', 'RC Celta de Vigo': 'Сельта', 'Real Betis Balompié': 'Бетис', 'Sevilla FC': 'Севилья', 'Valencia CF': 'Валенсия', 'Lazio Roma': 'Лацио', 'Atalanta BC': 'Аталанта', 'AS Roma': 'Рома', 'Olympique de Marseille': 'Марсель', 'Lille OSC': 'Лилль', 'OGC Nice': 'Ницца', 'Stade Rennais FC': 'Ренн', 'RC Strasbourg Alsace': 'Страсбур', 'FC Nantes': 'Нант', 'SC Braga': 'Брага', 'RSC Anderlecht': 'Андерлехт', 'KRC Genk': 'Генк', 'Ferencvárosi TC': 'Ференцварош', 'Ludogorets Razgrad': 'Лудогорец', 'Qarabağ FK': 'Карабах', 'Sparta Praha': 'Спарта Прага', 'Slavia Praha': 'Славия Прага', 'SK Slavia Praha': 'Славия Прага', 'FC Basel 1893': 'Базель', 'Grasshopper Club Zürich': 'Грассхоппер', 'Manchester United FC': 'Манчестер Юнайтед', 'Villarreal CF': 'Вильярреал', 'PAE AEK': 'АЕК', 'LASK Linz': 'ЛАСК', 'Viking FK': 'Викинг', 'ŠK Slovan Bratislava': 'Слован Братислава', 'FK Bodø/Glimt': 'Будё-Глимт', 'Como 1907': 'Комо', 'RB Leipzig': 'РБ Лейпциг', 'Sabah FK': 'Сабах' };
 const teamSynonyms = { 'мс':'Манчестер Сити','ман сити':'Манчестер Сити','мю':'Манчестер Юнайтед','реал':'Реал Мадрид','реал мадрид':'Реал Мадрид','барса':'Барселона','барселона':'Барселона','бавария':'Бавария','дортмунд':'Боруссия Дортмунд','атлетико':'Атлетико Мадрид','интер':'Интер','наполи':'Наполи','псж':'ПСЖ','ливерпуль':'Ливерпуль','челси':'Челси','арсенал':'Арсенал','ювентус':'Ювентус','милан':'Милан','аякс':'Аякс','порту':'Порту','бенфика':'Бенфика','лион':'Лион','монако':'Монако','зальцбург':'Зальцбург','шахтер':'Шахтер','селтик':'Селтик','брюгге':'Брюгге','галатасарай':'Галатасарай','фенербахче':'Фенербахче','олимпиакос':'Олимпиакос','аек':'АЕК','копенгаген':'Копенгаген','янг бойз':'Янг Бойз','црвена звезда':'Црвена Звезда','ланс':'Ланс','реал сосьедад':'Реал Сосьедад','псв':'ПСВ','фейеноорд':'Фейеноорд','спортинг':'Спортинг','штутгарт':'Штутгарт','астон вилла':'Астон Вилла','болонья':'Болонья','жирона':'Жирона','сельта':'Сельта','бетис':'Бетис','севилья':'Севилья','валенсия':'Валенсия','лацио':'Лацио','аталанта':'Аталанта','рома':'Рома','марсель':'Марсель','лилль':'Лилль','ницца':'Ницца','ренн':'Ренн','нант':'Нант','брага':'Брага','андерлехт':'Андерлехт','генк':'Генк','ференцварош':'Ференцварош','лудогорец':'Лудогорец','карабах':'Карабах','базель':'Базель','вильярреал':'Вильярреал','ласк':'ЛАСК','викинг':'Викинг','слован братислава':'Слован Братислава','будё-глимт':'Будё-Глимт','комо':'Комо','рб лейпциг':'РБ Лейпциг','сабах':'Сабах' };
 const teamAliases = new Map();
@@ -623,7 +619,6 @@ function calculatePredictionFantiki(type, totalGoals, lvl) {
   return Math.round(base * (1 + getLevelBonus(lvl)));
 }
 
-// ========== DUELS ==========
 async function getUserActiveDuelsCount(userId) {
   const uid = String(userId).trim();
   const { Duels: ds, DuelBets: bs } = await batchGetSheets([{ sheet: 'Duels', range: 'A:I' }, { sheet: 'DuelBets', range: 'A:G' }]);
@@ -1388,7 +1383,6 @@ async function getUserPredictionsResponse(userId, query = {}) {
   return sortPredictionsResponse(r, query.sort);
 }
 
-// ========== Telegram ==========
 let telegramOffset = 0, conflictCounter = 0;
 async function callTelegram(method, params) {
   const url = `${TELEGRAM_API_BASE}/bot${BOT_TOKEN}/${method}`;
@@ -1490,8 +1484,6 @@ app.post(WEBHOOK_PATH, (req, res) => {
   if (req.body?.message) processTelegramMessage(req.body.message).catch(e => console.error('Webhook:', e.message));
 });
 
-// ========== API ==========
-
 app.get('/api/levels', (req, res) => res.json(LEVELS_DATA));
 
 app.get('/api/fantiki/today/:userId', asyncHandler(async (req, res) => {
@@ -1513,6 +1505,121 @@ app.get('/api/standings/user-division/:userId', asyncHandler(async (req, res) =>
     if (u) return res.json({ division: div.division, name: div.name, position: u.position, size: div.size, totalUsers: data.totalUsers });
   }
   res.status(404).json({ error: 'User not found' });
+}));
+
+app.get('/api/user-stats/:userId', asyncHandler(async (req, res) => {
+  const uid = String(req.params.userId || '').trim();
+  if (!uid) return res.status(400).json({ error: 'userId required' });
+
+  const { Matches: m, Predictions: p } = await batchGetSheets([
+    { sheet: 'Matches', range: 'A:J' }, { sheet: 'Predictions', range: 'A:K' }
+  ]);
+  const mMap = new Map(); m.forEach(r => { if (isDataRow(r, 'match_id')) mMap.set(String(r[0]).trim(), r); });
+  const lm = getLatestPredictionMap(p);
+  const teamStats = new Map();
+
+  for (const it of lm.values()) {
+    const row = p[it.idx];
+    if (!row || String(row[1] || '').trim() !== uid) continue;
+    if (String(row[8] || '').trim() === 'duplicate') continue;
+    const match = mMap.get(String(row[2] || '').trim());
+    if (!match || String(match[5] || '').trim() !== 'finished') continue;
+    const H = toScore(match[6]), A = toScore(match[7]);
+    if (H === null || A === null) continue;
+    
+    const result = calculatePoints(row[3], row[4], H, A);
+    const success = result.points > 0;
+    
+    const teams = [match[2], match[3]].filter(Boolean);
+    for (const t of teams) {
+      if (!teamStats.has(t)) teamStats.set(t, { total: 0, success: 0 });
+      const s = teamStats.get(t);
+      s.total++;
+      if (success) s.success++;
+    }
+  }
+
+  let favTeam = null, worstTeam = null;
+  let maxRate = -1, minRate = 2;
+
+  for (const [team, s] of teamStats) {
+    if (s.total < 3) continue;
+    const rate = s.success / s.total;
+    if (rate > maxRate) { maxRate = rate; favTeam = { name: team, rate, total: s.total, success: s.success }; }
+    if (rate < minRate) { minRate = rate; worstTeam = { name: team, rate, total: s.total, success: s.success }; }
+  }
+
+  res.json({ favTeam, worstTeam });
+}));
+
+app.get('/api/h2h/:u1/:u2', asyncHandler(async (req, res) => {
+  const u1 = String(req.params.u1 || '').trim();
+  const u2 = String(req.params.u2 || '').trim();
+  if (!u1 || !u2) return res.status(400).json({ error: 'Both userIds required' });
+
+  const { Matches: m, Predictions: p, Duels: d, DuelBets: b } = await batchGetSheets([
+    { sheet: 'Matches', range: 'A:J' }, { sheet: 'Predictions', range: 'A:K' },
+    { sheet: 'Duels', range: 'A:I' }, { sheet: 'DuelBets', range: 'A:G' }
+  ]);
+
+  const mMap = new Map(); m.forEach(r => { if (isDataRow(r, 'match_id')) mMap.set(String(r[0]).trim(), r); });
+  const lm = getLatestPredictionMap(p);
+  const preds1 = new Map(), preds2 = new Map();
+
+  for (const it of lm.values()) {
+    const row = p[it.idx];
+    if (!row) continue;
+    const uid = String(row[1] || '').trim();
+    const mid = String(row[2] || '').trim();
+    if (uid === u1) preds1.set(mid, row);
+    if (uid === u2) preds2.set(mid, row);
+  }
+
+  let commonMatches = 0, u1Points = 0, u2Points = 0, u1Exact = 0, u2Exact = 0;
+
+  for (const [mid, row1] of preds1) {
+    const row2 = preds2.get(mid);
+    if (!row2) continue;
+    const match = mMap.get(mid);
+    if (!match || String(match[5] || '').trim() !== 'finished') continue;
+    
+    commonMatches++;
+    const H = toScore(match[6]), A = toScore(match[7]);
+    const r1 = calculatePoints(row1[3], row1[4], H, A);
+    const r2 = calculatePoints(row2[3], row2[4], H, A);
+    u1Points += r1.points;
+    u2Points += r2.points;
+    if (r1.type === 'exact') u1Exact++;
+    if (r2.type === 'exact') u2Exact++;
+  }
+
+  let commonDuels = 0, u1DuelWins = 0, u2DuelWins = 0;
+  const duelsMap = new Map(); d.forEach(r => { if (isDataRow(r, 'duel_id')) duelsMap.set(String(r[0]).trim(), r); });
+  const userDuels = new Map();
+  
+  b.forEach(r => {
+    if (!isDataRow(r, 'bet_id')) return;
+    const did = String(r[1] || '').trim();
+    const uid = String(r[2] || '').trim();
+    if (!userDuels.has(did)) userDuels.set(did, { u1: false, u2: false });
+    if (uid === u1) userDuels.get(did).u1 = true;
+    if (uid === u2) userDuels.get(did).u2 = true;
+  });
+
+  for (const [did, involved] of userDuels) {
+    if (!involved.u1 || !involved.u2) continue;
+    const duel = duelsMap.get(did);
+    if (!duel || String(duel[4] || '').trim() !== 'settled') continue;
+    commonDuels++;
+    const winners = String(duel[8] || '').split(',').filter(Boolean);
+    if (winners.includes(u1)) u1DuelWins++;
+    if (winners.includes(u2)) u2DuelWins++;
+  }
+
+  res.json({
+    matches: { count: commonMatches, u1Points, u2Points, u1Exact, u2Exact },
+    duels: { count: commonDuels, u1Wins: u1DuelWins, u2Wins: u2DuelWins }
+  });
 }));
 
 app.get('/api/referral/info/:userId', asyncHandler(async (req, res) => {
