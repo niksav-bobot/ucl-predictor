@@ -5,6 +5,7 @@ const userId = tg.initDataUnsafe?.user?.id;
 const initData = tg.initData;
 const state = {
   standingsSort: { sortBy: '', order: '' },
+  standingsView: 'overall',
   myPredictionFilter: 'all',
   pastMatchesOpen: false,
   duelsView: 'open',
@@ -12,7 +13,6 @@ const state = {
   today: null,
 };
 
-// SVG для КБП (для использования в JS)
 const COIN_SVG = `<svg class="coin-svg" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="width:16px;height:16px;display:inline-block;vertical-align:middle;"><circle cx="12" cy="12" r="10" fill="#1e293b" stroke="#f97316" stroke-width="2"/><path d="M12 2a10 10 0 0 0-7.07 17.07" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/><path d="M12 22a10 10 0 0 0 7.07-17.07" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/><text x="12" y="15.5" font-size="7" font-weight="bold" text-anchor="middle" fill="#f97316" font-family="sans-serif">КБП</text></svg>`;
 
 function escapeHtml(v) { return String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;'); }
@@ -146,7 +146,6 @@ async function openBalanceModal() {
   `);
 }
 
-// ===== Правила =====
 function openRulesModal() {
   const html = `
     <div class="rules-text">
@@ -203,11 +202,11 @@ function openRulesModal() {
   openModal('Правила', html);
 }
 
-// ===== Профиль участника =====
 async function showParticipantProfile(targetUserId, displayName) {
-  const [bal, badgesData] = await Promise.all([
+  const [bal, badgesData, divInfo] = await Promise.all([
     apiJson(`/api/fantiki/balance/${encodeURIComponent(targetUserId)}`).catch(() => null),
     apiJson(`/api/season-titles/${encodeURIComponent(targetUserId)}`).catch(() => ({ badges: [] })),
+    apiJson(`/api/standings/user-division/${encodeURIComponent(targetUserId)}`).catch(() => null),
   ]);
   const badges = (badgesData?.badges || []);
   const lvlBonus = bal?.levelBonus ? `+${Math.round(bal.levelBonus * 100)}%` : '—';
@@ -216,7 +215,10 @@ async function showParticipantProfile(targetUserId, displayName) {
     ? `<div class="profile-badges">${badges.map(b => `<span class="profile-badge">${escapeHtml(b.name)}</span>`).join('')}</div>`
     : '<div class="muted">Бейджей пока нет</div>';
 
+  const divBadge = divInfo ? `<div style="display:inline-block;padding:4px 12px;background:rgba(59,130,246,0.15);border-radius:20px;font-size:12px;color:var(--primary);font-weight:600;margin-bottom:12px">${escapeHtml(divInfo.name)} · #${divInfo.position} из ${divInfo.size}</div>` : '';
+
   const overlay = openModal(displayName, `
+    ${divBadge}
     <div class="profile-section">
       <div class="profile-balance">${bal?.balance ?? '—'} ${COIN_SVG}</div>
       <div class="muted">Баланс · за сезон заработано ${bal?.totalEarnedSeason ?? 0} ${COIN_SVG}</div>
@@ -250,7 +252,6 @@ async function showLevelsModal() {
   openModal('Уровни', `<div class="muted" style="margin-bottom:12px">Уровень повышается по мере накопления фантиков за сезон. Бонус прибавляется к наградам за прогнозы.</div><div class="levels-list">${html}</div>`);
 }
 
-// ===== Рефералка =====
 async function showReferralModal() {
   try {
     const info = await apiJson(`/api/referral/info/${encodeURIComponent(userId)}`);
@@ -284,7 +285,6 @@ async function showReferralModal() {
   } catch (e) { showToast('Ошибка загрузки рефералки: ' + e.message, 'error'); }
 }
 
-// ===== Auth / daily login =====
 async function tryDailyLogin() {
   if (!userId) return;
   try {
@@ -313,7 +313,6 @@ function setActiveNav(name) {
   if (btn) btn.classList.add('active');
 }
 
-// ===== Матчи =====
 function buildMatchCard(match, { finished = false } = {}) {
   const card = document.createElement('div');
   card.className = `match-card${finished ? ' finished-match' : ''}`;
@@ -427,7 +426,6 @@ async function showAllPredictions(match) {
   } catch (e) { showToast(`Ошибка: ${e.message}`, 'error'); }
 }
 
-// ===== Мои прогнозы =====
 function predictionCardHtml(p) {
   const f = p.status === 'finished', t = typeLabel(p.prediction_type);
   return `<div class="prediction-item ${p.prediction_type === 'exact' ? 'prediction-exact' : ''}"><div><strong>${escapeHtml(p.home_team)}</strong> vs <strong>${escapeHtml(p.away_team)}</strong></div><div class="muted">${escapeHtml(formatDateTime(p.kickoff_utc))}</div><div>Прогноз: <strong>${p.predicted_home ?? '-'} - ${p.predicted_away ?? '-'}</strong></div>${f ? `<div>Счёт: <strong>${p.home_score ?? '-'} - ${p.away_score ?? '-'}</strong></div>` : ''}${f ? `<div class="result-line">${t ? `${escapeHtml(t)} ·` : ''}<strong>${p.points} очк.</strong>${p.fantiki_awarded ? ` · +${p.fantiki_awarded} ${COIN_SVG}` : ''}</div>` : '<div class="muted">Матч ещё не завершён</div>'}</div>`;
@@ -450,23 +448,95 @@ async function loadMyPredictions(filter = state.myPredictionFilter) {
   } catch (e) { app.innerHTML = `<div class="empty-state error">${escapeHtml(e.message)}</div>`; }
 }
 
-// ===== Таблица =====
 function nextStandingsSort(sb) { const cur = state.standingsSort; if (cur.sortBy !== sb) return { sortBy: sb, order: sb === 'misses' ? 'asc' : 'desc' }; return { sortBy: sb, order: cur.order === 'asc' ? 'desc' : 'asc' }; }
 function sortArrow(sb) { if (state.standingsSort.sortBy !== sb) return ''; return state.standingsSort.order === 'asc' ? ' ↑' : ' ↓'; }
 
-async function loadStandings(sortBy = state.standingsSort.sortBy, order = state.standingsSort.order) {
+async function renderDivisionsView(app) {
+  const data = await apiJson('/api/standings/divisions');
+  const { divisions, divisionSize, totalUsers, splittingNotYetActive, minUsersForDivisions, neededForSplitting } = data;
+
+  let baseHtml = `<div class="section-header"><h2>Турнирная таблица</h2><span class="badge">${totalUsers} в игре</span></div>`;
+  baseHtml += `<div class="filter-bar" style="margin-bottom: 16px;">
+    <button data-view="overall">Все</button>
+    <button data-view="divisions" class="active">По дивизионам</button>
+  </div>`;
+
+  if (!divisions.length) {
+    app.innerHTML = baseHtml + `<div class="empty-state">Пока никто не набрал очки. Дивизионы появятся, как только у участников будут результаты!</div>`;
+    app.querySelectorAll('[data-view]').forEach(b => { b.onclick = () => loadStandings('', '', b.dataset.view); });
+    return;
+  }
+
+  let myDiv = null, me = null;
+  for (const div of divisions) {
+    const found = div.users.find(x => x.userId === String(userId));
+    if (found) { myDiv = div; me = found; break; }
+  }
+
+  let html = baseHtml;
+
+  if (splittingNotYetActive) {
+    html += `<div class="standings-hint">Пока все в одной лиге (с очками: ${totalUsers}). Дивизионы появятся, когда наберётся ${minUsersForDivisions} активных участников (осталось ещё ${neededForSplitting}).</div>`;
+  } else {
+    html += `<div class="standings-hint">Участники разделены на ${divisions.length} ${divisions.length === 1 ? 'дивизион' : divisions.length < 5 ? 'дивизиона' : 'дивизионов'}. Чем выше очки — тем выше дивизион.</div>`;
+  }
+
+  if (myDiv && me) {
+    html += `<div style="background:rgba(59,130,246,0.15);border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:13px">
+      Вы в <strong>${escapeHtml(myDiv.name)}</strong> · #${me.position} из ${myDiv.size}
+    </div>`;
+  }
+
+  divisions.forEach(div => {
+    html += `<div class="division-header">${escapeHtml(div.name)} <span class="division-badge">${div.size}</span></div>`;
+    html += `<div class="responsive-table"><table><thead><tr>
+      <th>#</th><th>Участник</th><th>Очки</th><th>Точные</th><th>Разница</th><th>Исходы</th><th>Промахи</th>
+    </tr></thead><tbody>`;
+    div.users.forEach(u => {
+      const isMe = u.userId === String(userId);
+      const cls = isMe ? 'division-me' : '';
+      const nameHtml = isMe ? `${escapeHtml(u.displayName)}<span class="division-mine-badge">вы</span>` : escapeHtml(u.displayName);
+      html += `<tr class="${cls}">
+        <td>${u.position}</td>
+        <td><button class="link-button participant-link" data-uid="${escapeHtml(u.userId)}" data-name="${escapeHtml(u.displayName)}">${nameHtml}</button></td>
+        <td><button class="metric-button metric-points" data-uid="${escapeHtml(u.userId)}" data-name="${escapeHtml(u.displayName)}">${u.totalPoints}</button></td>
+        <td><button class="metric-button metric-exact" data-uid="${escapeHtml(u.userId)}" data-name="${escapeHtml(u.displayName)}">${u.exactScores}</button></td>
+        <td>${u.goalDifference}</td>
+        <td>${u.outcomes}</td>
+        <td>${u.misses}</td>
+      </tr>`;
+    });
+    html += '</tbody></table></div>';
+  });
+
+  app.innerHTML = html;
+
+  app.querySelectorAll('[data-view]').forEach(b => { b.onclick = () => loadStandings('', '', b.dataset.view); });
+  app.querySelectorAll('.participant-link').forEach(b => { b.onclick = () => showParticipantProfile(b.dataset.uid, b.dataset.name); });
+  app.querySelectorAll('.metric-points').forEach(b => { b.onclick = () => showParticipantPredictions(b.dataset.uid, b.dataset.name, 'successful'); });
+  app.querySelectorAll('.metric-exact').forEach(b => { b.onclick = () => showParticipantPredictions(b.dataset.uid, b.dataset.name, 'exact'); });
+}
+
+async function loadStandings(sortBy = state.standingsSort.sortBy, order = state.standingsSort.order, view) {
   setActiveNav('standings');
+  if (view) state.standingsView = view;
   state.standingsSort = { sortBy, order };
   const app = document.getElementById('app');
   app.innerHTML = '<div class="loading">Расчёт таблицы…</div>';
   try {
+    if (state.standingsView === 'divisions') {
+      await renderDivisionsView(app);
+      return;
+    }
+
     const params = new URLSearchParams();
     if (sortBy) params.set('sortBy', sortBy);
     if (order) params.set('order', order);
     const url = params.toString() ? `/api/standings?${params.toString()}` : '/api/standings';
     const [table, history] = await Promise.all([apiJson(url), apiJson('/api/standings-history').catch(() => ({ previousPositions: {}, currentPositions: {} }))]);
     const { previousPositions, currentPositions } = history;
-    app.innerHTML = `<div class="section-header"><h2>Турнирная таблица</h2><span class="badge">${table.length} участников</span></div><div class="standings-hint">Нажми на имя — профиль участника. На цифру — матчи категории.</div><div class="filter-bar standings-sort-bar"><button data-sort="" class="${!sortBy ? 'active' : ''}">Комплексно</button><button data-sort="points" class="${sortBy === 'points' ? 'active' : ''}">Очки</button><button data-sort="exact" class="${sortBy === 'exact' ? 'active' : ''}">Точные</button><button data-sort="difference" class="${sortBy === 'difference' ? 'active' : ''}">Разницы</button><button data-sort="draws" class="${sortBy === 'draws' ? 'active' : ''}">Ничьи</button><button data-sort="outcomes" class="${sortBy === 'outcomes' ? 'active' : ''}">Исходы</button><button data-sort="misses" class="${sortBy === 'misses' ? 'active' : ''}">Промахи</button><button id="show-last-round" class="secondary-button" style="margin-left: auto;">🏆 Тур</button></div><div class="responsive-table"><table><thead><tr><th>#</th><th>Участник</th><th><button class="table-sort" data-sort="points">Очки${sortArrow('points')}</button></th><th><button class="table-sort" data-sort="successful">Угадано${sortArrow('successful')}</button></th><th><button class="table-sort" data-sort="exact">Точные${sortArrow('exact')}</button></th><th><button class="table-sort" data-sort="difference">Разницы${sortArrow('difference')}</button></th><th><button class="table-sort" data-sort="draws">Ничьи${sortArrow('draws')}</button></th><th><button class="table-sort" data-sort="outcomes">Исходы${sortArrow('outcomes')}</button></th><th><button class="table-sort" data-sort="misses">Промахи${sortArrow('misses')}</button></th></tr></thead><tbody id="standings-body"></tbody></table></div>`;
+    app.innerHTML = `<div class="section-header"><h2>Турнирная таблица</h2><span class="badge">${table.length} участников</span></div><div class="standings-hint">Нажми на имя — профиль участника. На цифру — матчи категории.</div><div class="filter-bar" style="margin-bottom: 8px;"><button data-view="overall" class="active">Все</button><button data-view="divisions">По дивизионам</button></div><div class="filter-bar standings-sort-bar"><button data-sort="" class="${!sortBy ? 'active' : ''}">Комплексно</button><button data-sort="points" class="${sortBy === 'points' ? 'active' : ''}">Очки</button><button data-sort="exact" class="${sortBy === 'exact' ? 'active' : ''}">Точные</button><button data-sort="difference" class="${sortBy === 'difference' ? 'active' : ''}">Разницы</button><button data-sort="draws" class="${sortBy === 'draws' ? 'active' : ''}">Ничьи</button><button data-sort="outcomes" class="${sortBy === 'outcomes' ? 'active' : ''}">Исходы</button><button data-sort="misses" class="${sortBy === 'misses' ? 'active' : ''}">Промахи</button><button id="show-last-round" class="secondary-button" style="margin-left: auto;">🏆 Тур</button></div><div class="responsive-table"><table><thead><tr><th>#</th><th>Участник</th><th><button class="table-sort" data-sort="points">Очки${sortArrow('points')}</button></th><th><button class="table-sort" data-sort="successful">Угадано${sortArrow('successful')}</button></th><th><button class="table-sort" data-sort="exact">Точные${sortArrow('exact')}</button></th><th><button class="table-sort" data-sort="difference">Разницы${sortArrow('difference')}</button></th><th><button class="table-sort" data-sort="draws">Ничьи${sortArrow('draws')}</button></th><th><button class="table-sort" data-sort="outcomes">Исходы${sortArrow('outcomes')}</button></th><th><button class="table-sort" data-sort="misses">Промахи${sortArrow('misses')}</button></th></tr></thead><tbody id="standings-body"></tbody></table></div>`;
+    document.querySelectorAll('.filter-bar [data-view]').forEach(b => { b.onclick = () => loadStandings('', '', b.dataset.view); });
     document.getElementById('show-last-round').onclick = showLastRoundStandings;
     const body = document.getElementById('standings-body');
     if (!table.length) body.innerHTML = '<tr><td colspan="9">Нет участников.</td></tr>';
@@ -536,7 +606,6 @@ async function showLastRoundStandings() {
   } catch (e) { showToast(`Ошибка: ${e.message}`, 'error'); }
 }
 
-// ===== Дуэли =====
 function duelCardHtml(duel, { mine = false } = {}) {
   const isCreator = duel.creator_id === String(userId);
   const isParticipant = duel.participants.some(p => p.userId === String(userId));
@@ -643,7 +712,6 @@ async function cancelDuel(duelId) {
   } catch (e) { showToast(e.message, 'error'); }
 }
 
-// ===== Навигация =====
 document.getElementById('header-clickable').addEventListener('click', openBalanceModal);
 document.getElementById('rules-btn').addEventListener('click', openRulesModal);
 document.getElementById('nav-matches').addEventListener('click', () => loadMatches());

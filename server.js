@@ -355,6 +355,80 @@ async function getTodayBalance(userId) {
   return { date: currentMatchday, total, breakdown, count: dayTx.length };
 }
 
+// ========== Дивизионы ==========
+const DIVISION_SIZE = Number(process.env.DIVISION_SIZE || 10);
+const MIN_USERS_FOR_DIVISIONS = Number(process.env.MIN_USERS_FOR_DIVISIONS || 20);
+const DIVISION_NAMES = ['💎 Платина', '🥇 Золото', '🥈 Серебро', '🥉 Бронза', 'Лига 5', 'Лига 6', 'Лига 7', 'Лига 8', 'Лига 9', 'Лига 10'];
+function divisionName(idx) { return DIVISION_NAMES[idx] || `Лига ${idx + 1}`; }
+
+async function getDivisionsData() {
+  const usersData = await getSheetData('Users', 'A:R');
+  const users = usersData.filter(row => isDataRow(row, 'user_id')).map(row => ({
+    userId: String(row[0] || '').trim(),
+    username: row[1] || '',
+    displayName: row[2] || row[1] || 'User',
+    totalPoints: toNum(row[4], 0),
+    successfulPredictions: toNum(row[6], 0),
+    exactScores: toNum(row[7], 0),
+    goalDifference: toNum(row[8], 0),
+    draws: toNum(row[9], 0),
+    outcomes: toNum(row[10], 0),
+    misses: toNum(row[11], 0),
+    level: toNum(row[14], 0),
+    levelName: levelToName(toNum(row[14], 0)),
+  })).filter(u => u.userId && u.totalPoints > 0);
+
+  users.sort((a, b) => {
+    if (b.totalPoints !== a.totalPoints) return b.totalPoints - a.totalPoints;
+    if (b.exactScores !== a.exactScores) return b.exactScores - a.exactScores;
+    if (b.goalDifference !== a.goalDifference) return b.goalDifference - a.goalDifference;
+    if (b.draws !== a.draws) return b.draws - a.draws;
+    if (b.outcomes !== a.outcomes) return b.outcomes - a.outcomes;
+    if (a.misses !== b.misses) return a.misses - b.misses;
+    return String(a.userId).localeCompare(String(b.userId), 'ru', { numeric: true });
+  });
+
+  const N = users.length;
+  if (!N) return { divisions: [], divisionSize: DIVISION_SIZE, totalUsers: 0, numDivisions: 0, minUsersForDivisions: MIN_USERS_FOR_DIVISIONS, splittingNotYetActive: false };
+
+  if (N < MIN_USERS_FOR_DIVISIONS) {
+    return {
+      divisions: [{
+        division: 1,
+        name: '🏆 Общая лига',
+        size: N,
+        users: users.map((u, i) => ({ ...u, position: i + 1 })),
+      }],
+      divisionSize: DIVISION_SIZE,
+      totalUsers: N,
+      numDivisions: 1,
+      minUsersForDivisions: MIN_USERS_FOR_DIVISIONS,
+      splittingNotYetActive: true,
+      neededForSplitting: MIN_USERS_FOR_DIVISIONS - N,
+    };
+  }
+
+  const numDivisions = Math.max(1, Math.ceil(N / DIVISION_SIZE));
+  const baseSize = Math.floor(N / numDivisions);
+  const remainder = N % numDivisions;
+
+  const divisions = [];
+  let cursor = 0;
+  for (let d = 0; d < numDivisions; d++) {
+    const size = baseSize + (d < remainder ? 1 : 0);
+    const chunk = users.slice(cursor, cursor + size);
+    cursor += size;
+    divisions.push({
+      division: d + 1,
+      name: divisionName(d),
+      size: chunk.length,
+      users: chunk.map((u, i) => ({ ...u, position: i + 1 })),
+    });
+  }
+  return { divisions, divisionSize: DIVISION_SIZE, totalUsers: N, numDivisions, minUsersForDivisions: MIN_USERS_FOR_DIVISIONS, splittingNotYetActive: false };
+}
+
+// ========== Прогнозы: логика ==========
 function getLatestPredictionMap(data) {
   const latest = new Map();
   data.forEach((row, idx) => {
@@ -1389,6 +1463,21 @@ app.get('/api/fantiki/today/:userId', asyncHandler(async (req, res) => {
   const info = await getTodayBalance(req.params.userId);
   if (!info) return res.status(400).json({ error: 'userId required' });
   res.json(info);
+}));
+
+app.get('/api/standings/divisions', asyncHandler(async (req, res) => {
+  res.json(await getDivisionsData());
+}));
+
+app.get('/api/standings/user-division/:userId', asyncHandler(async (req, res) => {
+  const uid = String(req.params.userId || '').trim();
+  if (!uid) return res.status(400).json({ error: 'userId required' });
+  const data = await getDivisionsData();
+  for (const div of data.divisions) {
+    const u = div.users.find(x => x.userId === uid);
+    if (u) return res.json({ division: div.division, name: div.name, position: u.position, size: div.size, totalUsers: data.totalUsers });
+  }
+  res.status(404).json({ error: 'User not found' });
 }));
 
 app.get('/api/referral/info/:userId', asyncHandler(async (req, res) => {
