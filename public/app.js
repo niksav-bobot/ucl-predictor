@@ -274,6 +274,7 @@ async function showParticipantProfile(targetUserId, displayName) {
     <button id="profile-chart" class="secondary-button full-width" style="margin-top:8px">📊 Динамика очков</button>
     ${!isMe ? `<button id="profile-h2h" class="secondary-button full-width" style="margin-top:8px; border: 1px solid var(--primary); color: var(--primary);">⚔️ Сравнить с собой</button>` : ''}
     ${isMe ? `<button id="profile-shop" class="secondary-button full-width" style="margin-top:8px; border: 1px solid #f59e0b; color: #f59e0b;">🛒 Магазин</button>` : ''}
+    ${isMe ? `<button id="profile-leagues" class="secondary-button full-width" style="margin-top:8px; border: 1px solid var(--primary); color: var(--primary);">👥 Приватные лиги</button>` : ''}
     ${isMe ? `<button id="profile-referral" class="secondary-button full-width" style="margin-top:8px; border: 1px solid var(--success); color: var(--success);">🎁 Пригласить друга (+150)</button>` : ''}
   `);
 
@@ -286,6 +287,7 @@ async function showParticipantProfile(targetUserId, displayName) {
   }
   if (isMe) {
     overlay.querySelector('#profile-shop').onclick = openShopModal;
+    overlay.querySelector('#profile-leagues').onclick = showPrivateLeaguesModal;
     overlay.querySelector('#profile-referral').onclick = showReferralModal;
   }
 }
@@ -405,6 +407,154 @@ async function showReferralModal() {
   } catch (e) { showToast('Ошибка загрузки рефералки: ' + e.message, 'error'); }
 }
 
+// ============================================================
+// [SPRINT 2] ПРИВАТНЫЕ ЛИГИ — UI
+// ============================================================
+async function showPrivateLeaguesModal() {
+  try {
+    const leagues = await apiJson(`/api/private-leagues/my/${encodeURIComponent(userId)}`);
+    let html = '<div class="muted" style="margin-bottom:12px;line-height:1.5">Создай лигу для друзей или вступи по коду. Внутри — отдельная таблица только ваших участников.</div>';
+    if (!leagues.length) {
+      html += '<div class="empty-state compact">Пока нет приватных лиг.</div>';
+    } else {
+      html += leagues.map(l => `
+        <div class="league-card">
+          <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
+            <div>
+              <div style="font-weight:700;font-size:15px">${escapeHtml(l.name)}</div>
+              <div class="muted" style="font-size:12px">${l.memberCount}/${l.maxMembers} участников · ${l.isOwner ? 'владелец' : 'участник'}</div>
+            </div>
+            <button class="primary-button league-open-btn" data-id="${escapeHtml(l.leagueId)}" style="padding:6px 10px;font-size:12px">Открыть</button>
+          </div>
+          <div class="muted" style="font-size:12px;margin-top:8px">Код: <strong>${escapeHtml(l.inviteCode)}</strong></div>
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <button class="secondary-button league-copy-btn" data-code="${escapeHtml(l.inviteCode)}" style="padding:6px 10px;font-size:12px">Копировать код</button>
+          </div>
+        </div>
+      `).join('');
+    }
+    html += `<button id="league-create-btn" class="primary-button full-width">+ Создать лигу</button>
+      <button id="league-join-btn" class="secondary-button full-width" style="margin-top:8px">Вступить по коду</button>`;
+    const o = openModal('👥 Приватные лиги', html);
+    o.querySelector('#league-create-btn').onclick = openCreatePrivateLeagueModal;
+    o.querySelector('#league-join-btn').onclick = () => openJoinPrivateLeagueModal();
+    o.querySelectorAll('.league-open-btn').forEach(b => b.onclick = () => showPrivateLeagueView(b.dataset.id));
+    o.querySelectorAll('.league-copy-btn').forEach(b => b.onclick = () => {
+      navigator.clipboard.writeText(b.dataset.code).then(() => showToast('Код скопирован', 'success'));
+    });
+  } catch (e) { showToast('Ошибка лиг: ' + e.message, 'error'); }
+}
+
+function openCreatePrivateLeagueModal() {
+  const o = openModal('Создать приватную лигу', `
+    <label class="form-label">Название</label>
+    <input id="league-name" class="form-input" maxlength="40" placeholder="Например: Друзья КБП">
+    <label class="form-label">Описание (необязательно)</label>
+    <input id="league-desc" class="form-input" maxlength="200" placeholder="Коротко о лиге">
+    <button id="league-create-submit" class="primary-button full-width">Создать</button>
+  `);
+  o.querySelector('#league-create-submit').onclick = async () => {
+    const name = o.querySelector('#league-name').value.trim();
+    const description = o.querySelector('#league-desc').value.trim();
+    if (name.length < 3) { showToast('Название минимум 3 символа', 'error'); return; }
+    const b = o.querySelector('#league-create-submit');
+    b.disabled = true; b.textContent = 'Создание...';
+    try {
+      const r = await apiJson('/api/private-leagues/create', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData, userId: String(userId), name, description }),
+      });
+      closeModal();
+      showToast('Лига создана', 'success');
+      await showPrivateLeagueView(r.leagueId);
+    } catch (e) { showToast(e.message, 'error'); b.disabled = false; b.textContent = 'Создать'; }
+  };
+}
+
+function openJoinPrivateLeagueModal(prefill = '') {
+  const o = openModal('Вступить в лигу', `
+    <label class="form-label">Код приглашения</label>
+    <input id="league-code" class="form-input" maxlength="12" value="${escapeHtml(prefill)}" placeholder="ABC12345" style="text-transform:uppercase">
+    <button id="league-join-submit" class="primary-button full-width">Вступить</button>
+  `);
+  o.querySelector('#league-join-submit').onclick = async () => {
+    const code = o.querySelector('#league-code').value.trim();
+    const b = o.querySelector('#league-join-submit');
+    b.disabled = true; b.textContent = 'Вступление...';
+    try {
+      await joinPrivateLeagueByCode(code, true);
+      closeModal();
+    } catch (e) { showToast(e.message, 'error'); b.disabled = false; b.textContent = 'Вступить'; }
+  };
+}
+
+async function joinPrivateLeagueByCode(code, openAfter = true) {
+  const r = await apiJson('/api/private-leagues/join', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ initData, userId: String(userId), code }),
+  });
+  showToast(r.alreadyMember ? 'Вы уже в этой лиге' : 'Вы вступили в лигу', 'success');
+  if (openAfter) await showPrivateLeagueView(r.leagueId);
+  return r;
+}
+
+async function showPrivateLeagueView(leagueId) {
+  try {
+    const data = await apiJson(`/api/private-leagues/${encodeURIComponent(leagueId)}?userId=${encodeURIComponent(userId)}&initData=${encodeURIComponent(initData || '')}`);
+    const l = data.league;
+    const rows = data.standings || [];
+    let table = '<div class="responsive-table"><table><thead><tr><th>#</th><th>Участник</th><th>Очки</th><th>Точные</th><th>Разница</th><th>Исходы</th><th>Промахи</th></tr></thead><tbody>';
+    if (!rows.length) table += '<tr><td colspan="7">Пока нет участников.</td></tr>';
+    else rows.forEach(u => {
+      const isMe = u.userId === String(userId);
+      table += `<tr class="${isMe ? 'division-me' : ''}"><td>${u.position}</td><td>${escapeHtml(u.displayName)}${isMe ? '<span class="division-mine-badge">вы</span>' : ''}</td><td><strong>${u.totalPoints}</strong></td><td>${u.exactScores}</td><td>${u.goalDifference}</td><td>${u.outcomes}</td><td>${u.misses}</td></tr>`;
+    });
+    table += '</tbody></table></div>';
+
+    const html = `
+      <div class="muted" style="margin-bottom:10px">${escapeHtml(l.description || '')}</div>
+      <div style="background:rgba(59,130,246,0.12);border-radius:10px;padding:12px;margin-bottom:12px">
+        <div class="muted" style="font-size:12px">Код приглашения</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:6px">
+          <strong style="font-size:20px;letter-spacing:1px">${escapeHtml(l.inviteCode)}</strong>
+          <button id="league-view-copy" class="secondary-button" style="padding:6px 10px;font-size:12px">Копировать</button>
+        </div>
+        <div class="muted" style="font-size:12px;margin-top:6px">${l.memberCount}/${l.maxMembers} участников</div>
+      </div>
+      ${table}
+      <button id="league-view-share" class="secondary-button full-width" style="margin-top:12px">Поделиться приглашением</button>
+      ${!l.isOwner ? '<button id="league-view-leave" class="secondary-button full-width" style="margin-top:8px;border:1px solid var(--danger);color:var(--danger)">Выйти из лиги</button>' : ''}
+      ${l.isOwner ? '<button id="league-view-delete" class="secondary-button full-width" style="margin-top:8px;border:1px solid var(--danger);color:var(--danger)">Удалить лигу</button>' : ''}
+    `;
+    const o = openModal(l.name, html);
+    o.querySelector('#league-view-copy').onclick = () => navigator.clipboard.writeText(l.inviteCode).then(() => showToast('Код скопирован', 'success'));
+    o.querySelector('#league-view-share').onclick = () => {
+      const link = l.inviteLink || `https://t.me/ucl_predictor_bot?startapp=${encodeURIComponent('league_join_' + l.inviteCode)}`;
+      const text = encodeURIComponent(`Вступай в приватную лигу «${l.name}» в КБП!`);
+      tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(link)}&text=${text}`);
+    };
+    const leaveBtn = o.querySelector('#league-view-leave');
+    if (leaveBtn) leaveBtn.onclick = async () => {
+      if (!confirm('Выйти из лиги?')) return;
+      try {
+        await apiJson(`/api/private-leagues/${encodeURIComponent(l.leagueId)}/leave`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData, userId: String(userId) }) });
+        closeModal(); showToast('Вы вышли из лиги', 'success');
+      } catch (e) { showToast(e.message, 'error'); }
+    };
+    const delBtn = o.querySelector('#league-view-delete');
+    if (delBtn) delBtn.onclick = async () => {
+      if (!confirm('Удалить лигу? Она исчезнет у всех участников.')) return;
+      try {
+        await apiJson(`/api/private-leagues/${encodeURIComponent(l.leagueId)}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData, userId: String(userId) }) });
+        closeModal(); showToast('Лига удалена', 'success');
+      } catch (e) { showToast(e.message, 'error'); }
+    };
+  } catch (e) { showToast('Ошибка лиги: ' + e.message, 'error'); }
+}
+// ============================================================
+// /[SPRINT 2] ПРИВАТНЫЕ ЛИГИ — UI
+// ============================================================
+
 async function showH2HModal(otherUserId, otherName) {
   try {
     const data = await apiJson(`/api/h2h/${encodeURIComponent(userId)}/${encodeURIComponent(otherUserId)}`);
@@ -476,6 +626,10 @@ async function auth() {
             const open = await apiJson('/api/duels/open');
             const duel = open.find(d => d.duel_id === duelId);
             if (duel) await openJoinDuelModal(duel);
+          } else if (startParam.startsWith('league_join_')) {
+            await joinPrivateLeagueByCode(startParam.replace('league_join_', ''), true);
+          } else if (startParam.startsWith('league_')) {
+            await showPrivateLeagueView(startParam.replace('league_', ''));
           } else if (startParam === 'matches') {
             await loadMatches();
           } else if (startParam === 'table') {

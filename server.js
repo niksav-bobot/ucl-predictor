@@ -36,10 +36,12 @@ const ODDS_SPORT_KEY = process.env.ODDS_SPORT_KEY || 'soccer_uefa_champions_leag
 const ODDS_CACHE_TTL_MS = 60 * 60 * 1000;
 let oddsCache = { fetchedAt: 0, events: [] };
 
+// [SPRINT 2] Добавлены 2 листа для приватных лиг
 const EXPECTED_COLUMNS = {
   Users: 18, Predictions: 11, Matches: 10, MatchEvents: 7,
   FantikiTransactions: 7, Duels: 9, DuelBets: 7, QuestsProgress: 5,
   MatchdayBonuses: 7, SeasonBadges: 6, ShopItems: 6, UserInventory: 4,
+  PrivateLeagues: 8, PrivateLeagueMembers: 6,
 };
 
 let heavyJobRunning = false;
@@ -206,6 +208,9 @@ async function migrateFantiki() {
     { name: 'QuestsProgress', headers: ['user_id','quest_id','matchday_key','completed_at','awarded'] },
     { name: 'MatchdayBonuses', headers: ['bonus_id','matchday_key','type','user_id','place','amount','awarded_at'] },
     { name: 'SeasonBadges', headers: ['badge_id','user_id','season_label','badge_key','badge_name','awarded_at'] },
+    // [SPRINT 2] Приватные лиги
+    { name: 'PrivateLeagues', headers: ['league_id','name','owner_id','invite_code','created_at','is_active','description','max_members'] },
+    { name: 'PrivateLeagueMembers', headers: ['member_id','league_id','user_id','joined_at','role','status'] },
   ];
   for (const s of newSheets) { const r = await setupSheet(s.name, s.headers); if (r.created) result.sheetsCreated.push(s.name); }
   const usersHeaders = ['user_id','username','display_name','registration_date','points','total_predictions','successful','exact','difference','draws','outcomes','misses','fantiki_balance','total_earned_season','level','historical_earned','referred_by','referral_awarded'];
@@ -383,6 +388,265 @@ const DIVISION_SIZE = Number(process.env.DIVISION_SIZE || 10);
 const MIN_USERS_FOR_DIVISIONS = Number(process.env.MIN_USERS_FOR_DIVISIONS || 20);
 const DIVISION_NAMES = ['💎 Платина', '🥇 Золото', '🥈 Серебро', '🥉 Бронза', 'Лига 5', 'Лига 6', 'Лига 7', 'Лига 8', 'Лига 9', 'Лига 10'];
 function divisionName(idx) { return DIVISION_NAMES[idx] || `Лига ${idx + 1}`; }
+
+// ============================================================
+// [SPRINT 2] ПРИВАТНЫЕ ЛИГИ — константы и хелперы
+// ============================================================
+const PRIVATE_LEAGUE_MAX_MEMBERS = Number(process.env.PRIVATE_LEAGUE_MAX_MEMBERS || 50);
+const PRIVATE_LEAGUE_MAX_OWNED = Number(process.env.PRIVATE_LEAGUE_MAX_OWNED || 3);
+const PRIVATE_LEAGUE_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+function generatePrivateLeagueCode(len = 8) {
+  let s = '';
+  for (let i = 0; i < len; i++) s += PRIVATE_LEAGUE_CODE_ALPHABET[Math.floor(Math.random() * PRIVATE_LEAGUE_CODE_ALPHABET.length)];
+  return s;
+}
+function normalizePrivateLeagueCode(v) {
+  return String(v || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+function privateLeagueInviteLink(code) {
+  return getMiniAppUrl(`league_join_${code}`);
+}
+
+async function getPrivateLeagueById(leagueId) {
+  const lid = String(leagueId || '').trim();
+  if (!lid) return null;
+  const data = await getSheetData('PrivateLeagues', 'A:H');
+  const idx = data.findIndex(r => isDataRow(r, 'league_id') && String(r[0] || '').trim() === lid);
+  if (idx === -1) return null;
+  const row = padRow(data[idx], EXPECTED_COLUMNS.PrivateLeagues);
+  return {
+    rowIndex: idx,
+    leagueId: String(row[0] || '').trim(),
+    name: row[1] || '',
+    ownerId: String(row[2] || '').trim(),
+    inviteCode: String(row[3] || '').trim(),
+    createdAt: row[4] || '',
+    isActive: String(row[5] || '').toUpperCase() === 'TRUE',
+    description: row[6] || '',
+    maxMembers: toNum(row[7], PRIVATE_LEAGUE_MAX_MEMBERS),
+  };
+}
+
+async function getPrivateLeagueMembers(leagueId) {
+  const lid = String(leagueId || '').trim();
+  if (!lid) return [];
+  const data = await getSheetData('PrivateLeagueMembers', 'A:F');
+  return data.map((row, idx) => ({ row, idx }))
+    .filter(({ row }) => isDataRow(row, 'member_id')
+      && String(row[1] || '').trim() === lid
+      && String(row[5] || '').trim() === 'active')
+    .map(({ row }) => ({
+      memberId: String(row[0] || '').trim(),
+      leagueId: lid,
+      userId: String(row[2] || '').trim(),
+      joinedAt: row[3] || '',
+      role: String(row[4] || 'member').trim(),
+      status: 'active',
+    }));
+}
+
+async function getPrivateLeagueStandings(leagueId) {
+  const members = await getPrivateLeagueMembers(leagueId);
+  const usersData = await getSheetData('Users', 'A:R');
+  const byId = new Map();
+  usersData.forEach(r => {
+    if (!isDataRow(r, 'user_id')) return;
+    byId.set(String(r[0] || '').trim(), padRow(r, EXPECTED_COLUMNS.Users));
+  });
+  const rows = members.map(m => {
+    const u = byId.get(m.userId);
+    if (!u) return null;
+    return {
+      userId: m.userId,
+      displayName: u[2] || u[1] || m.userId,
+      totalPoints: toNum(u[4], 0),
+      exactScores: toNum(u[7], 0),
+      goalDifference: toNum(u[8], 0),
+      draws: toNum(u[9], 0),
+      outcomes: toNum(u[10], 0),
+      misses: toNum(u[11], 0),
+      levelName: levelToName(toNum(u[14], 0)),
+    };
+  }).filter(Boolean);
+
+  rows.sort((a, b) =>
+    b.totalPoints - a.totalPoints ||
+    b.exactScores - a.exactScores ||
+    b.goalDifference - a.goalDifference ||
+    b.draws - a.draws ||
+    b.outcomes - a.outcomes ||
+    a.misses - b.misses ||
+    a.displayName.localeCompare(b.displayName, 'ru')
+  );
+  rows.forEach((r, i) => r.position = i + 1);
+  return rows;
+}
+
+async function getPrivateLeaguesForUser(userId) {
+  const uid = String(userId || '').trim();
+  if (!uid) return [];
+  const { PrivateLeagues: ls, PrivateLeagueMembers: ms } = await batchGetSheets([
+    { sheet: 'PrivateLeagues', range: 'A:H' },
+    { sheet: 'PrivateLeagueMembers', range: 'A:F' },
+  ]);
+  const activeLeagues = new Map();
+  ls.forEach(r => {
+    if (!isDataRow(r, 'league_id')) return;
+    if (String(r[5] || '').toUpperCase() !== 'TRUE') return;
+    activeLeagues.set(String(r[0] || '').trim(), padRow(r, EXPECTED_COLUMNS.PrivateLeagues));
+  });
+  const membersByLeague = new Map();
+  ms.forEach(r => {
+    if (!isDataRow(r, 'member_id')) return;
+    if (String(r[5] || '').trim() !== 'active') return;
+    const lid = String(r[1] || '').trim();
+    if (!membersByLeague.has(lid)) membersByLeague.set(lid, []);
+    membersByLeague.get(lid).push(r);
+  });
+  const result = [];
+  ms.forEach(r => {
+    if (!isDataRow(r, 'member_id')) return;
+    if (String(r[5] || '').trim() !== 'active') return;
+    if (String(r[2] || '').trim() !== uid) return;
+    const lid = String(r[1] || '').trim();
+    const l = activeLeagues.get(lid);
+    if (!l) return;
+    const members = membersByLeague.get(lid) || [];
+    const code = String(l[3] || '').trim();
+    result.push({
+      leagueId: lid,
+      name: l[1] || '',
+      description: l[6] || '',
+      ownerId: String(l[2] || '').trim(),
+      inviteCode: code,
+      inviteLink: privateLeagueInviteLink(code),
+      memberCount: members.length,
+      maxMembers: toNum(l[7], PRIVATE_LEAGUE_MAX_MEMBERS),
+      role: String(r[4] || 'member').trim(),
+      isOwner: String(l[2] || '').trim() === uid,
+      createdAt: l[4] || '',
+    });
+  });
+  result.sort((a, b) => (new Date(b.createdAt).getTime() || 0) - (new Date(a.createdAt).getTime() || 0));
+  return result;
+}
+
+async function createPrivateLeague(userId, name, description = '') {
+  const uid = String(userId || '').trim();
+  const nm = String(name || '').trim().replace(/\s+/g, ' ');
+  if (!uid) return { success: false, error: 'Unauthorized' };
+  if (nm.length < 3 || nm.length > 40) return { success: false, error: 'Название 3–40 символов' };
+  const { PrivateLeagues: ls, PrivateLeagueMembers: ms } = await batchGetSheets([
+    { sheet: 'PrivateLeagues', range: 'A:H' },
+    { sheet: 'PrivateLeagueMembers', range: 'A:F' },
+  ]);
+  const owned = ls.filter(r => isDataRow(r, 'league_id')
+    && String(r[2] || '').trim() === uid
+    && String(r[5] || '').toUpperCase() === 'TRUE').length;
+  if (owned >= PRIVATE_LEAGUE_MAX_OWNED) return { success: false, error: `Максимум ${PRIVATE_LEAGUE_MAX_OWNED} созданных лиг` };
+
+  const activeCodes = new Set(ls.filter(r => isDataRow(r, 'league_id') && String(r[5] || '').toUpperCase() === 'TRUE').map(r => String(r[3] || '').trim().toUpperCase()));
+  let code = generatePrivateLeagueCode();
+  while (activeCodes.has(code)) code = generatePrivateLeagueCode();
+
+  const now = new Date().toISOString();
+  const leagueId = `league_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const memberId = `plm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  await appendRows('PrivateLeagues', [[leagueId, nm, uid, code, now, 'TRUE', String(description || '').trim().slice(0, 200), PRIVATE_LEAGUE_MAX_MEMBERS]]);
+  await appendRows('PrivateLeagueMembers', [[memberId, leagueId, uid, now, 'owner', 'active']]);
+  return { success: true, leagueId, inviteCode: code, inviteLink: privateLeagueInviteLink(code) };
+}
+
+async function joinPrivateLeagueByCode(userId, code) {
+  const uid = String(userId || '').trim();
+  const c = normalizePrivateLeagueCode(code);
+  if (!uid) return { success: false, error: 'Unauthorized' };
+  if (!c) return { success: false, error: 'Укажите код' };
+  const { PrivateLeagues: ls, PrivateLeagueMembers: ms } = await batchGetSheets([
+    { sheet: 'PrivateLeagues', range: 'A:H' },
+    { sheet: 'PrivateLeagueMembers', range: 'A:F' },
+  ]);
+  const idx = ls.findIndex(r => isDataRow(r, 'league_id')
+    && String(r[5] || '').toUpperCase() === 'TRUE'
+    && String(r[3] || '').trim().toUpperCase() === c);
+  if (idx === -1) return { success: false, error: 'Код не найден' };
+  const l = padRow(ls[idx], EXPECTED_COLUMNS.PrivateLeagues);
+  const lid = String(l[0] || '').trim();
+  const max = toNum(l[7], PRIVATE_LEAGUE_MAX_MEMBERS);
+  const members = ms.filter((row) =>
+    isDataRow(row, 'member_id')
+    && String(row[1] || '').trim() === lid
+    && String(row[5] || '').trim() === 'active'
+  );
+  const existing = members.find((row) => String(row[2] || '').trim() === uid);
+  if (existing) return { success: true, leagueId: lid, inviteCode: c, inviteLink: privateLeagueInviteLink(c), alreadyMember: true };
+  if (members.length >= max) return { success: false, error: 'В лиге уже максимум участников' };
+  const now = new Date().toISOString();
+  const memberId = `plm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  await appendRows('PrivateLeagueMembers', [[memberId, lid, uid, now, 'member', 'active']]);
+  return { success: true, leagueId: lid, inviteCode: c, inviteLink: privateLeagueInviteLink(c) };
+}
+
+async function leavePrivateLeague(userId, leagueId) {
+  const uid = String(userId || '').trim();
+  const lid = String(leagueId || '').trim();
+  const l = await getPrivateLeagueById(lid);
+  if (!l || !l.isActive) return { success: false, error: 'Лига не найдена' };
+  if (l.ownerId === uid) return { success: false, error: 'Владелец не может выйти. Удалите лигу.' };
+  const ms = await getSheetData('PrivateLeagueMembers', 'A:F');
+  const idx = ms.findIndex(r => isDataRow(r, 'member_id')
+    && String(r[1] || '').trim() === lid
+    && String(r[2] || '').trim() === uid
+    && String(r[5] || '').trim() === 'active');
+  if (idx === -1) return { success: false, error: 'Вы не в лиге' };
+  const upd = padRow(ms[idx], EXPECTED_COLUMNS.PrivateLeagueMembers);
+  upd[5] = 'left';
+  await writeRow('PrivateLeagueMembers', idx, upd);
+  return { success: true };
+}
+
+async function deletePrivateLeague(userId, leagueId) {
+  const uid = String(userId || '').trim();
+  const l = await getPrivateLeagueById(leagueId);
+  if (!l || !l.isActive) return { success: false, error: 'Лига не найдена' };
+  if (l.ownerId !== uid) return { success: false, error: 'Только владелец' };
+  const data = await getSheetData('PrivateLeagues', 'A:H');
+  const upd = padRow(data[l.rowIndex], EXPECTED_COLUMNS.PrivateLeagues);
+  upd[5] = 'FALSE';
+  await writeRow('PrivateLeagues', l.rowIndex, upd);
+  return { success: true };
+}
+
+async function getPrivateLeagueView(userId, leagueId) {
+  const uid = String(userId || '').trim();
+  const l = await getPrivateLeagueById(leagueId);
+  if (!l || !l.isActive) return { success: false, code: 404, error: 'Лига не найдена' };
+  const members = await getPrivateLeagueMembers(l.leagueId);
+  const my = members.find(m => m.userId === uid);
+  if (!my) return { success: false, code: 403, error: 'Вы не участник лиги' };
+  const standings = await getPrivateLeagueStandings(l.leagueId);
+  return {
+    success: true,
+    league: {
+      leagueId: l.leagueId,
+      name: l.name,
+      description: l.description,
+      ownerId: l.ownerId,
+      inviteCode: l.inviteCode,
+      inviteLink: privateLeagueInviteLink(l.inviteCode),
+      memberCount: members.length,
+      maxMembers: l.maxMembers,
+      isOwner: l.ownerId === uid,
+      role: my.role,
+      createdAt: l.createdAt,
+    },
+    standings,
+  };
+}
+// ============================================================
+// /[SPRINT 2] ПРИВАТНЫЕ ЛИГИ
+// ============================================================
 
 async function getDivisionsData() {
   const usersData = await getSheetData('Users', 'A:R');
@@ -1933,6 +2197,54 @@ app.get('/api/standings/user-division/:userId', asyncHandler(async (req, res) =>
   }
   res.status(404).json({ error: 'User not found' });
 }));
+
+// ========== [SPRINT 2] PRIVATE LEAGUES API ==========
+app.get('/api/private-leagues/my/:userId', asyncHandler(async (req, res) => {
+  const uid = String(req.params.userId || '').trim();
+  if (!uid) return res.status(400).json({ error: 'userId required' });
+  res.json(await getPrivateLeaguesForUser(uid));
+}));
+
+app.post('/api/private-leagues/create', asyncHandler(async (req, res) => {
+  const uid = extractUserId(req);
+  if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+  const r = await createPrivateLeague(uid, req.body.name, req.body.description);
+  if (!r.success) return res.status(400).json(r);
+  res.json(r);
+}));
+
+app.post('/api/private-leagues/join', asyncHandler(async (req, res) => {
+  const uid = extractUserId(req);
+  if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+  const r = await joinPrivateLeagueByCode(uid, req.body.code);
+  if (!r.success) return res.status(400).json(r);
+  res.json(r);
+}));
+
+app.get('/api/private-leagues/:leagueId', asyncHandler(async (req, res) => {
+  const uid = extractUserId(req);
+  if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+  const r = await getPrivateLeagueView(uid, req.params.leagueId);
+  if (!r.success) return res.status(r.code || 400).json({ error: r.error });
+  res.json(r);
+}));
+
+app.post('/api/private-leagues/:leagueId/leave', asyncHandler(async (req, res) => {
+  const uid = extractUserId(req);
+  if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+  const r = await leavePrivateLeague(uid, req.params.leagueId);
+  if (!r.success) return res.status(400).json(r);
+  res.json(r);
+}));
+
+app.delete('/api/private-leagues/:leagueId', asyncHandler(async (req, res) => {
+  const uid = extractUserId(req);
+  if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+  const r = await deletePrivateLeague(uid, req.params.leagueId);
+  if (!r.success) return res.status(400).json(r);
+  res.json(r);
+}));
+// ========== /[SPRINT 2] PRIVATE LEAGUES API ==========
 
 // ========== SHOP ==========
 app.get('/api/shop/items/:userId', asyncHandler(async (req, res) => {
