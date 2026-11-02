@@ -23,6 +23,7 @@ const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const TELEGRAM_API_BASE = 'https://api.telegram.org';
 const BOT_USERNAME = process.env.BOT_USERNAME || 'ucl_predictor_bot';
+const APP_SHORT_NAME = process.env.APP_SHORT_NAME || '';
 const SEASON = process.env.FOOTBALL_SEASON || '2026';
 const EVENTS_BATCH_SIZE = Number(process.env.EVENTS_BATCH_SIZE || 4);
 const SYNC_INTERVAL_MS = (Number(process.env.SYNC_INTERVAL_MINUTES || 15) * 60 * 1000);
@@ -38,7 +39,7 @@ let oddsCache = { fetchedAt: 0, events: [] };
 const EXPECTED_COLUMNS = {
   Users: 18, Predictions: 11, Matches: 10, MatchEvents: 7,
   FantikiTransactions: 7, Duels: 9, DuelBets: 7, QuestsProgress: 5,
-  MatchdayBonuses: 7, SeasonBadges: 6,
+  MatchdayBonuses: 7, SeasonBadges: 6, ShopItems: 6, UserInventory: 4,
 };
 
 let heavyJobRunning = false;
@@ -197,6 +198,8 @@ async function setupSheet(sheetName, headers) {
 async function migrateFantiki() {
   const result = { sheetsCreated: [], columnsUpdated: [], usersInitialized: 0, predictionsInitialized: 0 };
   const newSheets = [
+    { name: 'ShopItems', headers: ['item_id','name','type','price','icon','description'] },
+    { name: 'UserInventory', headers: ['user_id','item_id','is_equipped','purchased_at'] },
     { name: 'FantikiTransactions', headers: ['tx_id','user_id','amount','reason','ref_id','created_at','balance_after'] },
     { name: 'Duels', headers: ['duel_id','match_id','creator_id','stake','status','created_at','settled_at','pot','winner_ids'] },
     { name: 'DuelBets', headers: ['bet_id','duel_id','user_id','predicted_home','predicted_away','joined_at','result'] },
@@ -234,6 +237,22 @@ async function migrateFantiki() {
     if (ch) { predUpdates.push({ rowIndex: idx, values: p }); result.predictionsInitialized++; }
   });
   if (predUpdates.length) await batchWriteRows('Predictions', predUpdates);
+
+  // Инициализация магазина
+  const shopData = await getSheetData('ShopItems', 'A:F');
+  if (shopData.length <= 1) {
+    const defaultItems = [
+      ['ava_default', 'Новичок', 'avatar', 0, '⚽', 'Стандартный аватар'],
+      ['ava_star', 'Звезда', 'avatar', 500, '🌟', 'Сияющий аватар'],
+      ['ava_king', 'Король', 'avatar', 1500, '👑', 'Королевский аватар'],
+      ['ava_fire', 'Огненный', 'avatar', 1000, '🔥', 'Горящий аватар'],
+      ['stat_pro', 'Профи', 'status', 300, '🎯', 'Статус настоящего эксперта'],
+      ['stat_risk', 'Рисковый', 'status', 800, '🎲', 'Для тех, кто любит рисковать'],
+      ['stat_legend', 'Легенда', 'status', 2000, '🏆', 'Статус для избранных'],
+      ['buff_second', 'Второй шанс', 'buff', 50, '⏱️', 'Изменить прогноз за 5 минут до матча'],
+    ];
+    await appendRows('ShopItems', defaultItems);
+  }
   return result;
 }
 
@@ -651,7 +670,7 @@ async function createDuel(userId, matchId, ph, pa, stake) {
   const bal = await getBalance(uid);
   if (!bal) return { success: false, error: 'Пользователь не найден' };
   if (bal.balance < s) return { success: false, error: 'Недостаточно фантиков' };
-  if ((await getUserActiveDuelsCount(uid)) >= 3) return { success: false, error: 'Максимум 3 активные дуэли' };
+  if ((await getUserActiveDuelsCount(uid)) >= 5) return { success: false, error: 'Максимум 5 активные дуэли' };
   if (await getUserMatchDuelBet(uid, mid)) return { success: false, error: 'Вы уже в дуэли на этот матч' };
 
   const duelId = `duel_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -690,7 +709,7 @@ async function joinDuel(userId, duelId, ph, pa) {
 
   const bal = await getBalance(uid);
   if (!bal || bal.balance < s) return { success: false, error: 'Недостаточно фантиков' };
-  if ((await getUserActiveDuelsCount(uid)) >= 3) return { success: false, error: 'Максимум 3 активные дуэли' };
+  if ((await getUserActiveDuelsCount(uid)) >= 5) return { success: false, error: 'Максимум 5 активные дуэли' };
   if (await getUserMatchDuelBet(uid, mid)) return { success: false, error: 'Вы уже в дуэли на этот матч' };
 
   const escrow = await awardFantiki(uid, -s, 'duel_stake', did, `duel_stake|${did}|${uid}`);
@@ -1390,6 +1409,394 @@ async function callTelegram(method, params) {
   if (!r.ok) { const t = await r.text(); throw new Error(`Telegram error: ${r.status} ${t}`); }
   return r.json();
 }
+
+const MAIN_KEYBOARD = {
+  keyboard: [
+    [{ text: '⚽ Матчи' }, { text: '📊 Таблица' }],
+    [{ text: '🎯 Мои' }, { text: '💰 Баланс' }],
+    [{ text: '⚔️ Дуэли' }, { text: '❓ Помощь' }],
+  ],
+  resize_keyboard: true,
+  is_persistent: true,
+};
+
+const BTN_TO_CMD = {
+  '⚽ Матчи': 'matches',
+  '📊 Таблица': 'table',
+  '🎯 Мои': 'my',
+  '💰 Баланс': 'balance',
+  '⚔️ Дуэли': 'duels',
+  '❓ Помощь': 'help',
+};
+
+function getMiniAppUrl(startParam = '') {
+  if (!RENDER_HOST) return '';
+  const base = `https://t.me/${BOT_USERNAME}/app`;
+  return startParam ? `${base}?startapp=${encodeURIComponent(startParam)}` : base;
+}
+
+async function setupBotUI() {
+  if (!BOT_TOKEN) return;
+  try {
+    await callTelegram('setMyCommands', {
+      commands: [
+        { command: 'start', description: 'Старт и открыть приложение' },
+        { command: 'matches', description: '⚽ Матчи игрового дня' },
+        { command: 'table', description: '📊 Турнирная таблица' },
+        { command: 'my', description: '🎯 Мои прогнозы' },
+        { command: 'balance', description: '💰 Баланс фантиков' },
+        { command: 'duels', description: '⚔️ Открытые дуэли' },
+        { command: 'rules', description: '📜 Правила начислений' },
+        { command: 'settings', description: '⚙️ Настройки уведомлений' },
+        { command: 'help', description: '❓ Помощь' },
+      ],
+    });
+    console.log('✅ Команды бота зарегистрированы');
+  } catch (e) { console.warn('setMyCommands:', e.message); }
+
+  if (RENDER_HOST) {
+    try {
+      await callTelegram('setChatMenuButton', {
+        menu_button: {
+          type: 'web_app',
+          text: 'Открыть КБП',
+          web_app: { url: `https://${RENDER_HOST}/` },
+        },
+      });
+      console.log('✅ Menu Button настроен');
+    } catch (e) { console.warn('setChatMenuButton:', e.message); }
+  }
+}
+
+function fmtKickoff(utc) {
+  const d = new Date(utc);
+  if (!Number.isFinite(d.getTime())) return '—';
+  return d.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+async function getUserOrCreate(msg) {
+  const from = msg.from;
+  const uid = String(from.id);
+  const usersData = await getSheetData('Users', 'A:R');
+  const user = usersData.find(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
+  return { uid, user, from };
+}
+
+async function sendPlain(chatId, text, extra = {}) {
+  await callTelegram('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', ...extra });
+}
+
+async function cmdStart(msg) {
+  const chatId = msg.chat.id;
+  const name = msg.from?.first_name || 'друг';
+  const miniAppUrl = getMiniAppUrl();
+  const startText = `👋 Привет, ${name}!
+
+🏆 <b>Лига Чемпионов КБП</b> — прогнозы на матчи ЛЧ.
+
+Делай прогнозы, зарабатывай фантики 🪙, дерись в дуэлях ⚔️ и расти в дивизионах 💎.
+
+${miniAppUrl ? '👇 Открывай приложение и начинай:' : 'Открой Mini App через кнопку меню.'}`;
+
+  const opts = { reply_markup: MAIN_KEYBOARD };
+  if (miniAppUrl) {
+    opts.reply_markup = {
+      inline_keyboard: [[{ text: '🚀 Открыть приложение', url: miniAppUrl }]],
+    };
+    await sendPlain(chatId, startText, opts);
+    await sendPlain(chatId, 'Постоянные кнопки для быстрого доступа:', { reply_markup: MAIN_KEYBOARD });
+  } else {
+    await sendPlain(chatId, startText, opts);
+  }
+}
+
+async function cmdHelp(msg) {
+  const chatId = msg.chat.id;
+  const text = `❓ <b>Как играть</b>
+
+🎯 <b>Прогнозы</b>
+Пиши боту: <code>Реал Мадрид - Барселона 2:1</code>
+Или открывай приложение → «Матчи».
+
+🏆 <b>Очки</b>
+• Точный счёт — 5
+• Ничья — 3
+• Разница — 3
+• Исход — 1
+• Промах — 0
+
+🪙 <b>Фантики</b> — внутренняя валюта. Их дают за прогнозы, квесты, серии. Тратятся в дуэлях и магазине.
+
+⚔️ <b>Дуэли</b> — ставка на счёт с другим игроком. Кто угадал — тот забрал банк.
+
+🎖 <b>Уровни</b> — от Новичка до Профи. Чем выше уровень, тем больше % к наградам.
+
+📜 Подробные правила: /rules`;
+
+  await sendPlain(chatId, text);
+}
+
+async function cmdRules(msg) {
+  const chatId = msg.chat.id;
+  const text = `📜 <b>Правила начислений</b>
+
+<b>🏆 Очки (турнирная таблица)</b>
+• Точный счёт — 5
+• Угадана ничья — 3
+• Угадана разница — 3
+• Угадан исход — 1
+• Промах — 0
+
+<b>💰 Фантики за прогнозы</b>
+• Исход — +10
+• Разница — +20
+• ТС — +50
+• ТС 6–7 голов — +75
+• ТС 8+ голов — +100
+
+<b>🔥 Серия ТС за день</b>
+2→+25 · 3→+75 · 4→+150 · 5+→+300
+
+<b>📅 Вход в день матча</b>
++10 фантиков (1 раз в день)
+
+<b>📋 Квесты тура</b>
+5 прогнозов → +30 · все → +50 · 1 ТС → +20 · 3 исхода → +15
+
+<b>🏅 Призовые в дивизионе</b>
+1-е → +60 · 2-е → +30 · 3-е → +15
+
+<b>🎁 Рефералка</b>
+Друг сделал 20 прогнозов → +150 тебе
+
+<b>🎖 Уровни</b>
+Новичок 100+ · Прогнозист 500+ (+5%) · Аналитик 1000+ (+10%) · Снайпер 2000+ (+15%) · Профи 5000+ (+25%)
+
+<b>⚔️ Дуэли</b>
+Ставка 10–500 (кратна 5). Нельзя ставить тот же счёт. 1 угадал — забирает банк, 2+ — делят, 0 — возврат всем.`;
+
+  await sendPlain(chatId, text);
+}
+
+async function cmdMatches(msg) {
+  const chatId = msg.chat.id;
+  const { uid } = await getUserOrCreate(msg);
+
+  const { Matches: m, Predictions: p } = await batchGetSheets([
+    { sheet: 'Matches', range: 'A:J' }, { sheet: 'Predictions', range: 'A:K' },
+  ]);
+
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const dayMatches = m.filter(r => isDataRow(r, 'match_id') && getMatchdayKey(r[4]) === todayKey);
+
+  let targetDay = todayKey;
+  let matches = dayMatches;
+  if (!matches.length) {
+    const future = m.filter(r => isDataRow(r, 'match_id') && String(r[5] || '').trim() === 'scheduled')
+      .sort((a, b) => new Date(a[4]).getTime() - new Date(b[4]).getTime());
+    if (future.length) {
+      targetDay = getMatchdayKey(future[0][4]);
+      matches = m.filter(r => isDataRow(r, 'match_id') && getMatchdayKey(r[4]) === targetDay);
+    }
+  }
+
+  if (!matches.length) {
+    await sendPlain(chatId, '⚽ Матчей в ближайшее время нет. Загляни позже!');
+    return;
+  }
+
+  const userPreds = getLatestPredictionsForUser(p, uid);
+  const dayLabel = new Date(`${targetDay}T00:00:00Z`).toLocaleDateString('ru-RU', { day: '2-digit', month: 'long' });
+
+  let text = `⚽ <b>Матчи — ${dayLabel}</b>\n\n`;
+  matches.forEach(r => {
+    const mid = String(r[0]).trim();
+    const home = r[2] || '', away = r[3] || '';
+    const status = String(r[5] || '').trim();
+    const kickoff = fmtKickoff(r[4]);
+    const myPred = userPreds.find(x => String(x[2]).trim() === mid);
+    let line = '';
+    if (status === 'finished') {
+      line = `✅ <b>${home} — ${away}</b>\n   Счёт: ${r[6] || '-'}:${r[7] || '-'}${myPred ? ` · твой: ${myPred[3]}:${myPred[4]}` : ''}`;
+    } else if (status === 'live') {
+      line = `🔴 <b>${home} — ${away}</b> · идёт\n   Твой прогноз: ${myPred ? `${myPred[3]}:${myPred[4]}` : '—'}`;
+    } else if (status === 'scheduled') {
+      line = `⏰ <b>${home} — ${away}</b> · ${kickoff}\n   ${myPred ? `Твой: ${myPred[3]}:${myPred[4]} ✓` : 'Прогноза нет ✗'}`;
+    } else {
+      line = `⏸ <b>${home} — ${away}</b> · ${status}`;
+    }
+    text += line + '\n\n';
+  });
+
+  const miniAppUrl = getMiniAppUrl('matches');
+  const opts = miniAppUrl ? {
+    reply_markup: { inline_keyboard: [[{ text: '🎯 Открыть прогнозы', url: miniAppUrl }]] },
+  } : {};
+  await sendPlain(chatId, text.trim(), opts);
+}
+
+async function cmdTable(msg) {
+  const chatId = msg.chat.id;
+  const { uid } = await getUserOrCreate(msg);
+  const div = await getDivisionsData();
+
+  if (!div.divisions.length) {
+    await sendPlain(chatId, '📊 Пока никто не набрал очки.');
+    return;
+  }
+
+  let myDiv = null, myPos = 0;
+  for (const d of div.divisions) {
+    const found = d.users.find(x => x.userId === uid);
+    if (found) { myDiv = d; myPos = found.position; break; }
+  }
+
+  if (!myDiv) {
+    await sendPlain(chatId, '📊 Ты пока не в таблице. Сделай первый прогноз!');
+    return;
+  }
+
+  let text = `📊 <b>${myDiv.name}</b>\n\n`;
+  myDiv.users.slice(0, 10).forEach(u => {
+    const mark = u.userId === uid ? ' ←' : '';
+    const medal = u.position === 1 ? '🥇' : u.position === 2 ? '🥈' : u.position === 3 ? '🥉' : '  ';
+    text += `${medal} ${u.position}. ${u.displayName} — <b>${u.totalPoints}</b>${mark}\n`;
+  });
+  if (myDiv.users.length > 10) text += `\n…ещё ${myDiv.users.length - 10} участников`;
+
+  text += `\n\nТы: <b>#${myPos}</b> из ${myDiv.size}`;
+
+  const miniAppUrl = getMiniAppUrl('table');
+  const opts = miniAppUrl ? {
+    reply_markup: { inline_keyboard: [[{ text: '📊 Полная таблица', url: miniAppUrl }]] },
+  } : {};
+  await sendPlain(chatId, text, opts);
+}
+
+async function cmdMy(msg) {
+  const chatId = msg.chat.id;
+  const { uid } = await getUserOrCreate(msg);
+
+  const { Matches: m, Predictions: p } = await batchGetSheets([
+    { sheet: 'Matches', range: 'A:J' }, { sheet: 'Predictions', range: 'A:K' },
+  ]);
+  const mMap = new Map(); m.forEach(r => { if (isDataRow(r, 'match_id')) mMap.set(String(r[0]).trim(), r); });
+  const userPreds = getLatestPredictionsForUser(p, uid);
+
+  if (!userPreds.length) {
+    await sendPlain(chatId, '🎯 У тебя пока нет прогнозов.\nОткрой приложение → «Матчи» и сделай первый!');
+    return;
+  }
+
+  const enriched = userPreds.map(pr => {
+    const match = mMap.get(String(pr[2]).trim());
+    return match ? { pr, match } : null;
+  }).filter(Boolean).sort((a, b) => new Date(b.match[4]).getTime() - new Date(a.match[4]).getTime()).slice(0, 5);
+
+  let text = '🎯 <b>Твои последние прогнозы</b>\n\n';
+  let wins = 0, total = 0;
+  enriched.forEach(({ pr, match }) => {
+    const status = String(match[5] || '').trim();
+    const home = match[2], away = match[3];
+    if (status === 'finished') {
+      const res = calculatePoints(pr[3], pr[4], match[6], match[7]);
+      total++;
+      const icon = res.points > 0 ? '✅' : '❌';
+      if (res.points > 0) wins++;
+      const typeLabel = { exact: 'ТС', difference: 'разница', draw: 'ничья', outcome: 'исход', miss: 'промах' }[res.type] || '';
+      text += `${icon} <b>${home} ${match[6]}:${match[7]} ${away}</b>\n   Твой: ${pr[3]}:${pr[4]} · ${typeLabel} (+${res.points})\n`;
+    } else if (status === 'scheduled') {
+      text += `⏰ <b>${home} — ${away}</b>\n   Твой: ${pr[3]}:${pr[4]} · скоро\n`;
+    } else {
+      text += `🔴 <b>${home} — ${away}</b>\n   Твой: ${pr[3]}:${pr[4]} · идёт\n`;
+    }
+  });
+
+  if (total > 0) text += `\n📈 Угадано ${wins} из ${total} завершённых`;
+
+  const miniAppUrl = getMiniAppUrl('my');
+  const opts = miniAppUrl ? {
+    reply_markup: { inline_keyboard: [[{ text: '📋 Все прогнозы', url: miniAppUrl }]] },
+  } : {};
+  await sendPlain(chatId, text, opts);
+}
+
+async function cmdBalance(msg) {
+  const chatId = msg.chat.id;
+  const { uid } = await getUserOrCreate(msg);
+  const [bal, today] = await Promise.all([
+    getBalance(uid),
+    getTodayBalance(uid).catch(() => null),
+  ]);
+
+  if (!bal) { await sendPlain(chatId, 'Пользователь не найден. Напиши /start'); return; }
+
+  const todayStr = today?.date ? `\n📈 За сегодня: <b>${today.total > 0 ? '+' : ''}${today.total}</b> 🪙` : '';
+  const nextLvlStr = bal.nextLevelAt
+    ? `\n➡️ До следующего уровня: ${bal.totalEarnedSeason} / ${bal.nextLevelAt}`
+    : '\n🎉 Максимальный уровень';
+
+  const text = `💰 <b>Твой баланс</b>
+
+🪙 Фантики: <b>${bal.balance}</b>${todayStr}
+🎖 Уровень: ${bal.levelName}${bal.levelBonus ? ` (+${Math.round(bal.levelBonus * 100)}% к наградам)` : ''}${nextLvlStr}
+📊 Заработано за сезон: ${bal.totalEarnedSeason}`;
+
+  const miniAppUrl = getMiniAppUrl('balance');
+  const opts = miniAppUrl ? {
+    reply_markup: { inline_keyboard: [[{ text: '🛒 Магазин', url: miniAppUrl }]] },
+  } : {};
+  await sendPlain(chatId, text, opts);
+}
+
+async function cmdDuels(msg) {
+  const chatId = msg.chat.id;
+  const duels = await listOpenDuels();
+
+  if (!duels.length) {
+    await sendPlain(chatId, '⚔️ Открытых дуэлей нет.\nСоздай свою в приложении!');
+    return;
+  }
+
+  let text = `⚔️ <b>Открытые дуэли (${duels.length})</b>\n\n`;
+  const buttons = [];
+  duels.slice(0, 5).forEach(d => {
+    text += `<b>${d.home_team} — ${d.away_team}</b>\n`;
+    text += `   Ставка: ${d.stake} 🪙 · Участников: ${d.participants_count}\n`;
+    text += `   ${fmtKickoff(d.kickoff_utc)}\n\n`;
+    const link = getMiniAppUrl(`duel_${d.duel_id}`);
+    if (link) buttons.push([{ text: `⚔️ Вступить · ${d.stake}🪙`, url: link }]);
+  });
+
+  const miniAppUrl = getMiniAppUrl('duels');
+  if (miniAppUrl) buttons.push([{ text: '➕ Создать дуэль', url: miniAppUrl }]);
+
+  await sendPlain(chatId, text.trim(), { reply_markup: { inline_keyboard: buttons.slice(0, 6) } });
+}
+
+async function cmdSettings(msg) {
+  const chatId = msg.chat.id;
+  const text = `⚙️ <b>Настройки уведомлений</b>\n\nУправляй уведомлениями в приложении — открой «Мои прогнозы» → «⚙️ Настройки».\n\nСкоро добавим: напоминания о матчах, результаты, призовые, уровни.`;
+  const miniAppUrl = getMiniAppUrl('settings');
+  const opts = miniAppUrl ? { reply_markup: { inline_keyboard: [[{ text: '⚙️ Открыть настройки', url: miniAppUrl }]] } } : {};
+  await sendPlain(chatId, text, opts);
+}
+
+async function routeCommand(msg, cmd) {
+  switch (cmd) {
+    case 'start': return cmdStart(msg);
+    case 'help': return cmdHelp(msg);
+    case 'rules': return cmdRules(msg);
+    case 'matches': return cmdMatches(msg);
+    case 'table': return cmdTable(msg);
+    case 'my': return cmdMy(msg);
+    case 'balance': return cmdBalance(msg);
+    case 'duels': return cmdDuels(msg);
+    case 'settings': return cmdSettings(msg);
+    default: return;
+  }
+}
+
 function parsePredictionText(text) {
   const c = String(text || '').replace(/^\/predict(?:@\w+)?\s+/i, '').trim();
   const m = c.match(/^(.+?)\s+[-–—]\s+(.+?)\s+(\d{1,2})\s*:\s*(\d{1,2})$/i);
@@ -1398,9 +1805,25 @@ function parsePredictionText(text) {
   if (!h || !a) return null;
   return { home: h, away: a, homeScore: Number(m[3]), awayScore: Number(m[4]) };
 }
+
 async function processTelegramMessage(msg) {
   const chatId = msg.chat?.id, from = msg.from, text = msg.text || '';
   if (!text || !from) return;
+
+  if (BTN_TO_CMD[text]) {
+    try { await routeCommand(msg, BTN_TO_CMD[text]); }
+    catch (e) { console.error('Command error:', e.message); await sendPlain(chatId, '⚠️ Ошибка, попробуй позже.'); }
+    return;
+  }
+
+  const cmdMatch = text.match(/^\/(\w+)(?:@\w+)?(?:\s|$)/);
+  if (cmdMatch) {
+    const cmd = cmdMatch[1].toLowerCase();
+    try { await routeCommand(msg, cmd); }
+    catch (e) { console.error('Command error:', e.message); await sendPlain(chatId, '⚠️ Ошибка, попробуй позже.'); }
+    return;
+  }
+
   const uid = String(from.id), un = from.username || '';
   const usersData = await getSheetData('Users', 'A:R');
   
@@ -1421,7 +1844,7 @@ async function processTelegramMessage(msg) {
   }
 
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  if (!lines.length || text.startsWith('/start')) return;
+  if (!lines.length) return;
   
   const matchesData = await getSheetData('Matches', 'A:J');
   const matches = matchesData.filter(r => isDataRow(r, 'match_id'));
@@ -1451,6 +1874,7 @@ async function processTelegramMessage(msg) {
     await callTelegram('sendMessage', { chat_id: chatId, text: `✅ Сохранено прогнозов: ${saved}` });
   }
 }
+
 async function startBotPolling() {
   if (!BOT_TOKEN) return;
   console.log('Запуск Telegram polling...');
@@ -1478,11 +1902,14 @@ async function startBotPolling() {
     await sleep(1000);
   }
 }
+
 app.post(WEBHOOK_PATH, (req, res) => {
   if (req.headers['x-telegram-bot-api-secret-token'] !== WEBHOOK_SECRET) return res.status(403).json({ error: 'Forbidden' });
   res.status(200).json({ ok: true });
   if (req.body?.message) processTelegramMessage(req.body.message).catch(e => console.error('Webhook:', e.message));
 });
+
+// ========== API ==========
 
 app.get('/api/levels', (req, res) => res.json(LEVELS_DATA));
 
@@ -1505,6 +1932,91 @@ app.get('/api/standings/user-division/:userId', asyncHandler(async (req, res) =>
     if (u) return res.json({ division: div.division, name: div.name, position: u.position, size: div.size, totalUsers: data.totalUsers });
   }
   res.status(404).json({ error: 'User not found' });
+}));
+
+// ========== SHOP ==========
+app.get('/api/shop/items/:userId', asyncHandler(async (req, res) => {
+  const uid = String(req.params.userId || '').trim();
+  const { ShopItems: items, UserInventory: inv } = await batchGetSheets([
+    { sheet: 'ShopItems', range: 'A:F' }, { sheet: 'UserInventory', range: 'A:D' }
+  ]);
+  
+  const userInv = inv.filter(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
+  
+  const result = items.filter(r => isDataRow(r, 'item_id')).map(r => {
+    const itemId = String(r[0]).trim();
+    const owned = userInv.find(x => String(x[1]).trim() === itemId);
+    return {
+      id: itemId,
+      name: r[1] || '',
+      type: r[2] || '',
+      price: toNum(r[3], 0),
+      icon: r[4] || '',
+      desc: r[5] || '',
+      owned: !!owned,
+      equipped: owned ? String(owned[2]).trim().toUpperCase() === 'TRUE' : false
+    };
+  });
+  res.json(result);
+}));
+
+app.post('/api/shop/buy', asyncHandler(async (req, res) => {
+  const uid = extractUserId(req);
+  const { itemId } = req.body;
+  if (!uid || !itemId) return res.status(400).json({ error: 'Missing params' });
+  
+  const { ShopItems: items, UserInventory: inv, Users: users } = await batchGetSheets([
+    { sheet: 'ShopItems', range: 'A:F' }, { sheet: 'UserInventory', range: 'A:D' }, { sheet: 'Users', range: 'A:R' }
+  ]);
+  
+  const item = items.find(r => isDataRow(r, 'item_id') && String(r[0]).trim() === itemId);
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+  const price = toNum(item[3], 0);
+  
+  const alreadyOwned = inv.some(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid && String(r[1]).trim() === itemId);
+  if (alreadyOwned) return res.status(400).json({ error: 'Уже куплено' });
+  
+  const uRow = users.find(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
+  const bal = toNum(padRow(uRow, EXPECTED_COLUMNS.Users)[12], 0);
+  if (bal < price) return res.status(400).json({ error: 'Недостаточно фантиков' });
+  
+  await awardFantiki(uid, -price, 'shop_buy', itemId, '');
+  await appendRows('UserInventory', [[uid, itemId, 'FALSE', new Date().toISOString()]]);
+  
+  res.json({ success: true, newBalance: bal - price });
+}));
+
+app.post('/api/shop/equip', asyncHandler(async (req, res) => {
+  const uid = extractUserId(req);
+  const { itemId } = req.body;
+  if (!uid || !itemId) return res.status(400).json({ error: 'Missing params' });
+  
+  const { ShopItems: items, UserInventory: inv } = await batchGetSheets([
+    { sheet: 'ShopItems', range: 'A:F' }, { sheet: 'UserInventory', range: 'A:D' }
+  ]);
+  
+  const item = items.find(r => isDataRow(r, 'item_id') && String(r[0]).trim() === itemId);
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+  const type = String(item[2]).trim();
+  
+  const updates = [];
+  inv.forEach((r, idx) => {
+    if (!isDataRow(r, 'user_id') || String(r[0]).trim() !== uid) return;
+    const thisItemId = String(r[1]).trim();
+    const thisItem = items.find(x => String(x[0]).trim() === thisItemId);
+    if (!thisItem || String(thisItem[2]).trim() !== type) return;
+    
+    const shouldEquip = thisItemId === itemId;
+    const isCurrently = String(r[2]).trim().toUpperCase() === 'TRUE';
+    if (shouldEquip !== isCurrently) {
+      const u = padRow(r, EXPECTED_COLUMNS.UserInventory);
+      u[2] = shouldEquip ? 'TRUE' : 'FALSE';
+      updates.push({ rowIndex: idx, values: u });
+    }
+  });
+  
+  if (updates.length) await batchWriteRows('UserInventory', updates);
+  res.json({ success: true });
 }));
 
 app.get('/api/user-stats/:userId', asyncHandler(async (req, res) => {
@@ -1549,7 +2061,22 @@ app.get('/api/user-stats/:userId', asyncHandler(async (req, res) => {
     if (rate < minRate) { minRate = rate; worstTeam = { name: team, rate, total: s.total, success: s.success }; }
   }
 
-  res.json({ favTeam, worstTeam });
+  const { UserInventory: inv, ShopItems: items } = await batchGetSheets([
+    { sheet: 'UserInventory', range: 'A:D' }, { sheet: 'ShopItems', range: 'A:F' }
+  ]);
+  let equippedAvatar = null, equippedStatus = null;
+  
+  inv.forEach(r => {
+    if (isDataRow(r, 'user_id') && String(r[0]).trim() === uid && String(r[2]).trim().toUpperCase() === 'TRUE') {
+      const item = items.find(x => isDataRow(x, 'item_id') && String(x[0]).trim() === String(r[1]).trim());
+      if (item) {
+        if (item[2] === 'avatar') equippedAvatar = item[4];
+        if (item[2] === 'status') equippedStatus = item[4] + ' ' + item[1];
+      }
+    }
+  });
+
+  res.json({ favTeam, worstTeam, equippedAvatar, equippedStatus });
 }));
 
 app.get('/api/h2h/:u1/:u2', asyncHandler(async (req, res) => {
@@ -2104,9 +2631,11 @@ const server = app.listen(PORT, async () => {
       await callTelegram('setWebhook', { url, allowed_updates: ['message'], drop_pending_updates: true, secret_token: WEBHOOK_SECRET });
       const info = await callTelegram('getWebhookInfo', {});
       console.log(`✅ Webhook. Pending: ${info.result?.pending_update_count || 0}`);
+      setupBotUI().catch(console.error);
     } catch (e) { console.error('❌ Webhook:', e.message); startBotPolling().catch(console.error); }
   } else {
     console.log(`Polling mode`);
+    setupBotUI().catch(console.error);
     startBotPolling().catch(console.error);
   }
 });

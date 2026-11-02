@@ -3,6 +3,7 @@ tg.ready();
 tg.expand();
 const userId = tg.initDataUnsafe?.user?.id;
 const initData = tg.initData;
+const startParam = String(tg.initDataUnsafe?.start_param || '').trim();
 const state = {
   standingsSort: { sortBy: '', order: '' },
   standingsView: 'overall',
@@ -245,13 +246,19 @@ async function showParticipantProfile(targetUserId, displayName) {
     : '<div class="muted">Бейджей пока нет</div>';
 
   const divBadge = divInfo ? `<div style="display:inline-block;padding:4px 12px;background:rgba(59,130,246,0.15);border-radius:20px;font-size:12px;color:var(--primary);font-weight:600;margin-bottom:12px">${escapeHtml(divInfo.name)} · #${divInfo.position} из ${divInfo.size}</div>` : '';
+  const avatarHtml = statsData?.equippedAvatar ? `<span style="font-size:24px; vertical-align:middle; margin-right:8px;">${statsData.equippedAvatar}</span>` : '';
+  const statusHtml = statsData?.equippedStatus ? `<div style="font-size:12px; color:var(--primary); font-weight:600; margin-bottom:4px;">${escapeHtml(statsData.equippedStatus)}</div>` : '';
 
   const overlay = openModal(displayName, `
     ${divBadge}
-    <div class="profile-section">
-      <div class="profile-balance">${bal?.balance ?? '—'} ${COIN_SVG}</div>
-      <div class="muted">Баланс · за сезон заработано ${bal?.totalEarnedSeason ?? 0} ${COIN_SVG}</div>
+    <div style="display:flex; align-items:center; margin-bottom:12px;">
+      ${avatarHtml}
+      <div>
+        ${statusHtml}
+        <div class="profile-balance" style="margin-bottom:0">${bal?.balance ?? '—'} ${COIN_SVG}</div>
+      </div>
     </div>
+    <div class="muted" style="margin-bottom:12px;">Баланс · за сезон заработано ${bal?.totalEarnedSeason ?? 0} ${COIN_SVG}</div>
     <div class="profile-level-click" id="profile-level-click">
       <div style="font-weight:600;margin-bottom:4px">${escapeHtml(bal?.levelName || 'Без уровня')} <span class="muted" style="font-weight:400">· ур. ${bal?.level ?? 0}</span></div>
       <div class="muted">Бонус к наградам: ${lvlBonus}</div>
@@ -266,6 +273,7 @@ async function showParticipantProfile(targetUserId, displayName) {
     <button id="profile-all-preds" class="primary-button full-width">Все прогнозы</button>
     <button id="profile-chart" class="secondary-button full-width" style="margin-top:8px">📊 Динамика очков</button>
     ${!isMe ? `<button id="profile-h2h" class="secondary-button full-width" style="margin-top:8px; border: 1px solid var(--primary); color: var(--primary);">⚔️ Сравнить с собой</button>` : ''}
+    ${isMe ? `<button id="profile-shop" class="secondary-button full-width" style="margin-top:8px; border: 1px solid #f59e0b; color: #f59e0b;">🛒 Магазин</button>` : ''}
     ${isMe ? `<button id="profile-referral" class="secondary-button full-width" style="margin-top:8px; border: 1px solid var(--success); color: var(--success);">🎁 Пригласить друга (+150)</button>` : ''}
   `);
 
@@ -277,6 +285,7 @@ async function showParticipantProfile(targetUserId, displayName) {
     overlay.querySelector('#profile-h2h').onclick = () => showH2HModal(targetUserId, displayName);
   }
   if (isMe) {
+    overlay.querySelector('#profile-shop').onclick = openShopModal;
     overlay.querySelector('#profile-referral').onclick = showReferralModal;
   }
 }
@@ -289,6 +298,78 @@ async function showLevelsModal() {
     return `<div class="level-row ${isCur ? 'level-current' : ''}"><span class="level-num">${l.level}</span><span class="level-name">${escapeHtml(l.name)}</span><span class="level-req">${l.min}+ ${COIN_SVG}</span><span class="level-bonus">${l.bonus > 0 ? `+${l.bonus}%` : '—'}</span></div>`;
   }).join('');
   openModal('Уровни', `<div class="muted" style="margin-bottom:12px">Уровень повышается по мере накопления фантиков за сезон. Бонус прибавляется к наградам за прогнозы.</div><div class="levels-list">${html}</div>`);
+}
+
+async function openShopModal() {
+  try {
+    const items = await apiJson(`/api/shop/items/${encodeURIComponent(userId)}`);
+    
+    let html = '<div class="muted" style="margin-bottom:12px">Покупай атрибуты и выделяйся среди других!</div>';
+    
+    const categories = [
+      { id: 'avatar', name: 'Аватары' },
+      { id: 'status', name: 'Статусы' },
+      { id: 'buff', name: 'Бонусы' }
+    ];
+    
+    categories.forEach(cat => {
+      const catItems = items.filter(i => i.type === cat.id);
+      if (!catItems.length) return;
+      
+      html += `<div class="modal-section-title">${cat.name}</div>`;
+      catItems.forEach(item => {
+        let btn = '';
+        if (item.owned) {
+          if (item.type === 'buff') {
+            btn = `<span class="muted" style="font-size:12px;">Куплен</span>`;
+          } else {
+            btn = item.equipped 
+              ? `<button class="secondary-button" style="padding:4px 8px; font-size:12px; opacity:0.5;" disabled>Надето</button>`
+              : `<button class="primary-button shop-equip-btn" data-id="${item.id}" style="padding:4px 8px; font-size:12px;">Надеть</button>`;
+          }
+        } else {
+          btn = `<button class="primary-button shop-buy-btn" data-id="${item.id}" data-price="${item.price}" style="padding:4px 8px; font-size:12px;">Купить за ${item.price} ${COIN_SVG}</button>`;
+        }
+        
+        html += `
+          <div style="display:flex; align-items:center; justify-content:space-between; padding:10px; background:rgba(255,255,255,0.04); border-radius:8px; margin-bottom:6px;">
+            <div>
+              <div style="font-size:15px; font-weight:600;">${item.icon} ${escapeHtml(item.name)}</div>
+              <div class="muted" style="font-size:12px;">${escapeHtml(item.desc)}</div>
+            </div>
+            ${btn}
+          </div>
+        `;
+      });
+    });
+    
+    const o = openModal('Магазин', html);
+    
+    o.querySelectorAll('.shop-buy-btn').forEach(b => {
+      b.onclick = async () => {
+        if (!confirm(`Купить за ${b.dataset.price} фантиков?`)) return;
+        b.disabled = true;
+        try {
+          await apiJson('/api/shop/buy', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: String(userId), itemId: b.dataset.id }) });
+          showToast('Куплено!', 'success');
+          await refreshHeader();
+          openShopModal();
+        } catch(e) { showToast(e.message, 'error'); b.disabled = false; }
+      };
+    });
+    
+    o.querySelectorAll('.shop-equip-btn').forEach(b => {
+      b.onclick = async () => {
+        b.disabled = true;
+        try {
+          await apiJson('/api/shop/equip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: String(userId), itemId: b.dataset.id }) });
+          showToast('Надето!', 'success');
+          openShopModal();
+        } catch(e) { showToast(e.message, 'error'); b.disabled = false; }
+      };
+    });
+    
+  } catch (e) { showToast('Ошибка магазина: ' + e.message, 'error'); }
 }
 
 async function showReferralModal() {
@@ -380,6 +461,35 @@ async function auth() {
     await refreshHeader();
     tryDailyLogin().catch(() => {});
     await loadMatches();
+
+    if (startParam) {
+      setTimeout(async () => {
+        try {
+          if (startParam.startsWith('match_')) {
+            const mid = startParam.replace('match_', '');
+            const matches = await apiJson(`/api/matches?userId=${encodeURIComponent(userId)}&includeFinished=true`);
+            const match = matches.find(m => m.match_id === mid);
+            if (match) await showAllPredictions(match);
+          } else if (startParam.startsWith('duel_')) {
+            const duelId = startParam.replace('duel_', '');
+            await loadDuels('open');
+            const open = await apiJson('/api/duels/open');
+            const duel = open.find(d => d.duel_id === duelId);
+            if (duel) await openJoinDuelModal(duel);
+          } else if (startParam === 'matches') {
+            await loadMatches();
+          } else if (startParam === 'table') {
+            await loadStandings('', '');
+          } else if (startParam === 'my') {
+            await loadMyPredictions('all');
+          } else if (startParam === 'duels') {
+            await loadDuels('open');
+          } else if (startParam === 'balance' || startParam === 'settings') {
+            await openBalanceModal();
+          }
+        } catch (e) { console.error('Deep link error:', e); }
+      }, 300);
+    }
   } catch (error) { document.getElementById('app').innerHTML = `<div class="empty-state error">${escapeHtml(error.message)}</div>`; }
 }
 
