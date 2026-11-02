@@ -48,6 +48,7 @@ const REASON_LABELS = {
   duel_refund: '↩️ Возврат из дуэли',
   referral_bonus: '🎁 Бонус за друга',
   admin_grant: '👑 Начисление',
+  stars_purchase: '⭐ Покупка за Stars',
 };
 
 async function apiJson(url, options = {}) {
@@ -157,9 +158,26 @@ async function openBalanceModal() {
     ? `<ul class="tx-list">${tx.map(t => `<li><span>${REASON_LABELS[t.reason] || escapeHtml(t.reason)}</span><span class="tx-amount ${cls(t.amount)}">${fmt(t.amount)}</span><span class="tx-sub">${escapeHtml(formatDateTime(t.createdAt))} · баланс ${t.balanceAfter}</span></li>`).join('')}</ul>`
     : '<div class="muted">Транзакций пока нет</div>';
 
-  openModal('Баланс фантиков', `
+  const starsPacksHtml = `
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:16px;">
+      <button class="secondary-button stars-buy-btn" data-pkg="p1" style="padding:10px 4px;font-size:12px;display:flex;flex-direction:column;align-items:center;gap:4px;">
+        <span>50 ⭐</span><span style="color:var(--success);font-weight:700;">5000 🪙</span>
+      </button>
+      <button class="secondary-button stars-buy-btn" data-pkg="p2" style="padding:10px 4px;font-size:12px;display:flex;flex-direction:column;align-items:center;gap:4px;border:1px solid var(--primary);">
+        <span>100 ⭐</span><span style="color:var(--success);font-weight:700;">11000 🪙</span><span style="font-size:9px;color:var(--primary);">Выгодно</span>
+      </button>
+      <button class="secondary-button stars-buy-btn" data-pkg="p3" style="padding:10px 4px;font-size:12px;display:flex;flex-direction:column;align-items:center;gap:4px;">
+        <span>250 ⭐</span><span style="color:var(--success);font-weight:700;">30000 🪙</span>
+      </button>
+    </div>
+  `;
+
+  const overlay = openModal('Баланс фантиков', `
     <div class="balance-total">Всего: <strong>${bal?.balance ?? '—'} ${COIN_SVG}</strong></div>
     <div class="muted" style="margin-bottom:8px">${escapeHtml(bal?.levelName || 'Без уровня')} · за сезон: ${bal?.totalEarnedSeason ?? 0} ${COIN_SVG}</div>
+    
+    <h4 class="modal-section-title">⭐ Купить фантики за Telegram Stars</h4>
+    ${starsPacksHtml}
 
     <h4 class="modal-section-title">Сегодня (обнуляется при старте следующего игрового дня)</h4>
     ${todayHtml}
@@ -170,6 +188,32 @@ async function openBalanceModal() {
     <h4 class="modal-section-title">Последние начисления</h4>
     ${txHtml}
   `);
+
+  overlay.querySelectorAll('.stars-buy-btn').forEach(btn => {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        const { invoiceLink } = await apiJson('/api/stars/invoice', { 
+          method: 'POST', 
+          headers: { 'Content-Type': 'application/json' }, 
+          body: JSON.stringify({ userId: String(userId), packageId: btn.dataset.pkg }) 
+        });
+        tg.openInvoice(invoiceLink, (status) => {
+          if (status === 'paid') {
+            showToast('Оплата прошла! Фантики зачислены.', 'success');
+            closeModal();
+            refreshHeader();
+          } else if (status === 'failed') {
+            showToast('Ошибка оплаты', 'error');
+          }
+          btn.disabled = false;
+        });
+      } catch (e) { 
+        showToast(e.message, 'error'); 
+        btn.disabled = false; 
+      }
+    };
+  });
 }
 
 function openRulesModal() {

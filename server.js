@@ -70,7 +70,6 @@ function invalidateSheetCache(sheet) {
   for (const key of [...sheetCache.keys()]) if (key.startsWith(`${sheet}!`)) sheetCache.delete(key);
 }
 
-// [SPRINT 3] Обработка отсутствующих листов
 function isMissingRangeError(e) {
   const msg = String(e?.message || e?.cause?.message || '');
   return e?.code === 400 && (msg.includes('Unable to parse range') || msg.includes('not found'));
@@ -1730,32 +1729,12 @@ async function callTelegram(method, params) {
 }
 
 function makeMainKeyboard() {
-  if (!RENDER_HOST) {
-    return {
-      keyboard: [
-        [{ text: '⚽ Матчи' }, { text: '📊 Таблица' }],
-        [{ text: '🎯 Мои' }, { text: '💰 Баланс' }],
-        [{ text: '⚔️ Дуэли' }, { text: '❓ Помощь' }],
-      ],
-      resize_keyboard: true,
-      is_persistent: true,
-    };
-  }
-  const base = `https://${RENDER_HOST}/`;
   return {
     keyboard: [
-      [
-        { text: '⚽ Матчи', web_app: { url: `${base}?section=matches` } },
-        { text: '🎯 Мои', web_app: { url: `${base}?section=my` } }
-      ],
-      [
-        { text: '📊 Таблица', web_app: { url: `${base}?section=table` } },
-        { text: '⚔️ Дуэли', web_app: { url: `${base}?section=duels` } }
-      ],
-      [
-        { text: '👥 Лиги', web_app: { url: `${base}?section=leagues` } },
-        { text: '❓ Помощь' }
-      ],
+      [{ text: '⚽ Матчи' }, { text: '📊 Таблица' }],
+      [{ text: '🎯 Мои' }, { text: '💰 Баланс' }],
+      [{ text: '⚔️ Дуэли' }, { text: '👥 Лиги' }],
+      [{ text: '❓ Помощь' }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -1763,6 +1742,12 @@ function makeMainKeyboard() {
 }
 
 const BTN_TO_CMD = {
+  '⚽ Матчи': 'matches',
+  '📊 Таблица': 'table',
+  '🎯 Мои': 'my',
+  '💰 Баланс': 'balance',
+  '⚔️ Дуэли': 'duels',
+  '👥 Лиги': 'leagues',
   '❓ Помощь': 'help',
 };
 
@@ -2161,6 +2146,12 @@ async function routeCommand(msg, cmd) {
     case 'my': return cmdMy(msg);
     case 'balance': return cmdBalance(msg);
     case 'duels': return cmdDuels(msg);
+    case 'leagues': {
+      const chatId = msg.chat.id;
+      const appUrl = RENDER_HOST ? `https://${RENDER_HOST}/?section=leagues` : '';
+      const opts = appUrl ? { reply_markup: { inline_keyboard: [[{ text: '👥 Открыть лиги', web_app: { url: appUrl } }]] } } : {};
+      return sendPlain(chatId, '👥 <b>Приватные лиги</b>\n\nСоздавай лиги с друзьями и соревнуйтесь внутри своего круга. Нажми кнопку ниже, чтобы перейти в раздел.', opts);
+    }
     case 'settings': return cmdSettings(msg);
     default: return;
   }
@@ -2198,8 +2189,29 @@ async function processCallbackQuery(cb) {
 
 async function processTelegramMessage(msg) {
   const chatId = msg.chat?.id, from = msg.from, text = msg.text || '';
-  if (!text || !from) return;
+  if (!from) return;
   const uid = String(from.id);
+
+  // Обработка успешной оплаты Stars
+  if (msg.successful_payment) {
+    try {
+      const payload = JSON.parse(msg.successful_payment.invoice_payload);
+      const { uid: targetUid, fantiki } = payload;
+      const chargeId = msg.successful_payment.telegram_payment_charge_id;
+      
+      const r = await awardFantiki(targetUid, fantiki, 'stars_purchase', chargeId, `stars|${chargeId}`);
+      if (r.success) {
+        await sendPlain(chatId, `✅ <b>Успешно!</b>\nНачислено <b>${fantiki}</b> 🪙 фантиков.\n\nСпасибо за поддержку проекта!`);
+      } else {
+        await sendPlain(chatId, `⚠️ Произошла ошибка при начислении. Напишите в поддержку. ID: ${chargeId}`);
+      }
+    } catch (e) {
+      console.error('Payment error:', e);
+    }
+    return;
+  }
+
+  if (!text) return;
 
   // Проверяем, ждем ли мы от юзера ввод счета
   if (userPredictState.has(uid)) {
@@ -2345,6 +2357,14 @@ async function startBotPolling() {
 app.post(WEBHOOK_PATH, (req, res) => {
   if (req.headers['x-telegram-bot-api-secret-token'] !== WEBHOOK_SECRET) return res.status(403).json({ error: 'Forbidden' });
   res.status(200).json({ ok: true });
+  
+  if (req.body?.pre_checkout_query) {
+    callTelegram('answerPreCheckoutQuery', {
+      pre_checkout_query_id: req.body.pre_checkout_query.id,
+      ok: true
+    }).catch(console.error);
+  }
+  
   if (req.body?.message) processTelegramMessage(req.body.message).catch(e => console.error('Webhook:', e.message));
   if (req.body?.callback_query) processCallbackQuery(req.body.callback_query).catch(e => console.error('Callback:', e.message));
 });
@@ -2419,6 +2439,37 @@ app.delete('/api/private-leagues/:leagueId', asyncHandler(async (req, res) => {
   const r = await deletePrivateLeague(uid, req.params.leagueId);
   if (!r.success) return res.status(400).json(r);
   res.json(r);
+}));
+
+// ========== TELEGRAM STARS ==========
+app.post('/api/stars/invoice', asyncHandler(async (req, res) => {
+  const uid = extractUserId(req);
+  if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+  
+  const packages = {
+    'p1': { stars: 50, fantiki: 5000, label: '5000 фантиков' },
+    'p2': { stars: 100, fantiki: 11000, label: '11000 фантиков' },
+    'p3': { stars: 250, fantiki: 30000, label: '30000 фантиков' }
+  };
+  
+  const pkg = packages[req.body.packageId];
+  if (!pkg) return res.status(400).json({ error: 'Invalid package' });
+
+  const payload = JSON.stringify({ uid, fantiki: pkg.fantiki });
+  
+  try {
+    const invoice = await callTelegram('createInvoiceLink', {
+      title: 'Покупка фантиков',
+      description: `Начисление ${pkg.label} в игру Лига Чемпионов КБП`,
+      payload: payload,
+      provider_token: '', // Для Stars всегда пусто
+      currency: 'XTR',
+      prices: [{ label: pkg.label, amount: pkg.stars }]
+    });
+    res.json({ invoiceLink: invoice.result });
+  } catch (e) {
+    res.status(500).json({ error: 'Ошибка создания счета: ' + e.message });
+  }
 }));
 
 // ========== SHOP ==========
