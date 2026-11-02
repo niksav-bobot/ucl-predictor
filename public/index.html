@@ -19,6 +19,9 @@
     .header-balance .today-amount.neg { color: var(--danger); }
     .header-balance .today-amount.zero { color: var(--muted); }
     .level-badge { font-size: 10px; color: var(--muted); padding-left: 8px; border-left: 1px solid var(--border); font-weight: 500; text-transform: uppercase; letter-spacing: 0.3px; }
+    .header-avatar-btn { width: 38px; height: 38px; min-width: 38px; border-radius: 50%; background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.3); display: flex; align-items: center; justify-content: center; font-size: 18px; padding: 0; overflow: hidden; cursor: pointer; transition: background 0.2s; }
+    .header-avatar-btn:hover { background: rgba(59,130,246,0.25); }
+    .header-avatar-btn img { width: 100%; height: 100%; object-fit: cover; image-rendering: pixelated; }
     .icon-btn { background: none; border: none; color: var(--muted); cursor: pointer; padding: 8px; border-radius: 10px; display: flex; align-items: center; justify-content: center; transition: background 0.2s; }
     .icon-btn:hover { background: rgba(255,255,255,0.1); color: var(--text); }
     .nav-bar { position: fixed; bottom: 0; left: 0; right: 0; background: var(--card); display: flex; justify-content: space-around; align-items: center; padding: 8px 0 env(safe-area-inset-bottom); border-top: 1px solid var(--border); z-index: 100; }
@@ -177,6 +180,7 @@
         <span id="today-value" class="today-amount zero">—</span>
         <span class="level-badge" id="level-badge" style="display:none"></span>
       </div>
+      <button class="header-avatar-btn" id="header-avatar-btn" aria-label="Профиль">👤</button>
     </div>
   </header>
   <div id="app"></div>

@@ -3,7 +3,17 @@ tg.ready();
 tg.expand();
 const userId = tg.initDataUnsafe?.user?.id;
 const initData = tg.initData;
-const startParam = String(tg.initDataUnsafe?.start_param || '').trim();
+
+function getStartSection() {
+  const sp = String(tg.initDataUnsafe?.start_param || '').trim();
+  if (sp) return sp;
+  try {
+    const p = new URLSearchParams(window.location.search);
+    return p.get('section') || p.get('startapp') || '';
+  } catch { return ''; }
+}
+const startParam = getStartSection();
+
 const state = {
   standingsSort: { sortBy: '', order: '' },
   standingsView: 'overall',
@@ -12,6 +22,7 @@ const state = {
   duelsView: 'open',
   balance: null,
   today: null,
+  userStats: null,
 };
 
 const COIN_SVG = `<svg class="coin-svg" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="width:16px;height:16px;display:inline-block;vertical-align:middle;"><circle cx="12" cy="12" r="10" fill="#1e293b" stroke="#f97316" stroke-width="2"/><path d="M12 2a10 10 0 0 0-7.07 17.07" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/><path d="M12 22a10 10 0 0 0 7.07-17.07" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/><text x="12" y="15.5" font-size="7" font-weight="bold" text-anchor="middle" fill="#f97316" font-family="sans-serif">КБП</text></svg>`;
@@ -73,12 +84,26 @@ function showToast(message, type = 'info', ttl = 2500) {
 async function refreshHeader() {
   if (!userId) return;
   try {
-    const [bal, today] = await Promise.all([
+    const [bal, today, stats] = await Promise.all([
       apiJson(`/api/fantiki/balance/${encodeURIComponent(userId)}`).catch(() => null),
       apiJson(`/api/fantiki/today/${encodeURIComponent(userId)}`).catch(() => null),
+      apiJson(`/api/user-stats/${encodeURIComponent(userId)}`).catch(() => null),
     ]);
     state.balance = bal;
     state.today = today;
+    state.userStats = stats;
+
+    const avBtn = document.getElementById('header-avatar-btn');
+    if (avBtn) {
+      if (stats?.equippedAvatarUrl) {
+        const src = stats.equippedAvatarUrl.startsWith('http') ? stats.equippedAvatarUrl : `${window.location.origin}${stats.equippedAvatarUrl}`;
+        avBtn.innerHTML = `<img src="${src}" alt="" style="width:100%;height:100%;object-fit:cover;image-rendering:pixelated;">`;
+      } else if (stats?.equippedAvatar) {
+        avBtn.innerHTML = `<span>${stats.equippedAvatar}</span>`;
+      } else {
+        avBtn.innerHTML = '👤';
+      }
+    }
 
     const todayVal = document.getElementById('today-value');
     const lvlBadge = document.getElementById('level-badge');
@@ -246,7 +271,15 @@ async function showParticipantProfile(targetUserId, displayName) {
     : '<div class="muted">Бейджей пока нет</div>';
 
   const divBadge = divInfo ? `<div style="display:inline-block;padding:4px 12px;background:rgba(59,130,246,0.15);border-radius:20px;font-size:12px;color:var(--primary);font-weight:600;margin-bottom:12px">${escapeHtml(divInfo.name)} · #${divInfo.position} из ${divInfo.size}</div>` : '';
-  const avatarHtml = statsData?.equippedAvatar ? `<span style="font-size:24px; vertical-align:middle; margin-right:8px;">${statsData.equippedAvatar}</span>` : '';
+  
+  let avatarHtml = '';
+  if (statsData?.equippedAvatarUrl) {
+    const src = statsData.equippedAvatarUrl.startsWith('http') ? statsData.equippedAvatarUrl : `${window.location.origin}${statsData.equippedAvatarUrl}`;
+    avatarHtml = `<img src="${escapeHtml(src)}" alt="" style="width:48px;height:48px;border-radius:8px;image-rendering:pixelated;vertical-align:middle;margin-right:10px;">`;
+  } else if (statsData?.equippedAvatar) {
+    avatarHtml = `<span style="font-size:28px; vertical-align:middle; margin-right:10px;">${statsData.equippedAvatar}</span>`;
+  }
+
   const statusHtml = statsData?.equippedStatus ? `<div style="font-size:12px; color:var(--primary); font-weight:600; margin-bottom:4px;">${escapeHtml(statsData.equippedStatus)}</div>` : '';
 
   const overlay = openModal(displayName, `
@@ -333,11 +366,18 @@ async function openShopModal() {
           btn = `<button class="primary-button shop-buy-btn" data-id="${item.id}" data-price="${item.price}" style="padding:4px 8px; font-size:12px;">Купить за ${item.price} ${COIN_SVG}</button>`;
         }
         
+        const imgTag = item.imageUrl 
+          ? `<img src="${escapeHtml(item.imageUrl)}" alt="" style="width:40px;height:40px;border-radius:8px;object-fit:cover;margin-right:10px;vertical-align:middle;">` 
+          : `<span style="font-size:24px;margin-right:10px;vertical-align:middle;">${item.icon}</span>`;
+
         html += `
           <div style="display:flex; align-items:center; justify-content:space-between; padding:10px; background:rgba(255,255,255,0.04); border-radius:8px; margin-bottom:6px;">
-            <div>
-              <div style="font-size:15px; font-weight:600;">${item.icon} ${escapeHtml(item.name)}</div>
-              <div class="muted" style="font-size:12px;">${escapeHtml(item.desc)}</div>
+            <div style="display:flex;align-items:center;">
+              ${imgTag}
+              <div>
+                <div style="font-size:15px; font-weight:600;">${escapeHtml(item.name)}</div>
+                <div class="muted" style="font-size:12px;">${escapeHtml(item.desc)}</div>
+              </div>
             </div>
             ${btn}
           </div>
@@ -366,6 +406,7 @@ async function openShopModal() {
         try {
           await apiJson('/api/shop/equip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: String(userId), itemId: b.dataset.id }) });
           showToast('Надето!', 'success');
+          await refreshHeader();
           openShopModal();
         } catch(e) { showToast(e.message, 'error'); b.disabled = false; }
       };
@@ -407,9 +448,6 @@ async function showReferralModal() {
   } catch (e) { showToast('Ошибка загрузки рефералки: ' + e.message, 'error'); }
 }
 
-// ============================================================
-// [SPRINT 2] ПРИВАТНЫЕ ЛИГИ — UI
-// ============================================================
 async function showPrivateLeaguesModal() {
   try {
     const leagues = await apiJson(`/api/private-leagues/my/${encodeURIComponent(userId)}`);
@@ -551,9 +589,6 @@ async function showPrivateLeagueView(leagueId) {
     };
   } catch (e) { showToast('Ошибка лиги: ' + e.message, 'error'); }
 }
-// ============================================================
-// /[SPRINT 2] ПРИВАТНЫЕ ЛИГИ — UI
-// ============================================================
 
 async function showH2HModal(otherUserId, otherName) {
   try {
@@ -630,6 +665,12 @@ async function auth() {
             await joinPrivateLeagueByCode(startParam.replace('league_join_', ''), true);
           } else if (startParam.startsWith('league_')) {
             await showPrivateLeagueView(startParam.replace('league_', ''));
+          } else if (startParam === 'leagues') {
+            await showPrivateLeaguesModal();
+          } else if (startParam === 'shop') {
+            await openShopModal();
+          } else if (startParam === 'settings') {
+            await openBalanceModal();
           } else if (startParam === 'matches') {
             await loadMatches();
           } else if (startParam === 'table') {
@@ -638,7 +679,7 @@ async function auth() {
             await loadMyPredictions('all');
           } else if (startParam === 'duels') {
             await loadDuels('open');
-          } else if (startParam === 'balance' || startParam === 'settings') {
+          } else if (startParam === 'balance') {
             await openBalanceModal();
           }
         } catch (e) { console.error('Deep link error:', e); }
@@ -1057,6 +1098,9 @@ async function cancelDuel(duelId) {
 }
 
 document.getElementById('header-clickable').addEventListener('click', openBalanceModal);
+document.getElementById('header-avatar-btn')?.addEventListener('click', () => {
+  showParticipantProfile(String(userId), state.balance?.levelName ? 'Мой профиль' : 'Профиль');
+});
 document.getElementById('rules-btn').addEventListener('click', openRulesModal);
 document.getElementById('nav-matches').addEventListener('click', () => loadMatches());
 document.getElementById('nav-my-predictions').addEventListener('click', () => loadMyPredictions('all'));

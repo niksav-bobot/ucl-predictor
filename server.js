@@ -23,7 +23,6 @@ const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const TELEGRAM_API_BASE = 'https://api.telegram.org';
 const BOT_USERNAME = process.env.BOT_USERNAME || 'ucl_predictor_bot';
-const APP_SHORT_NAME = process.env.APP_SHORT_NAME || '';
 const SEASON = process.env.FOOTBALL_SEASON || '2026';
 const EVENTS_BATCH_SIZE = Number(process.env.EVENTS_BATCH_SIZE || 4);
 const SYNC_INTERVAL_MS = (Number(process.env.SYNC_INTERVAL_MINUTES || 15) * 60 * 1000);
@@ -36,11 +35,10 @@ const ODDS_SPORT_KEY = process.env.ODDS_SPORT_KEY || 'soccer_uefa_champions_leag
 const ODDS_CACHE_TTL_MS = 60 * 60 * 1000;
 let oddsCache = { fetchedAt: 0, events: [] };
 
-// [SPRINT 2] Добавлены 2 листа для приватных лиг
 const EXPECTED_COLUMNS = {
   Users: 18, Predictions: 11, Matches: 10, MatchEvents: 7,
   FantikiTransactions: 7, Duels: 9, DuelBets: 7, QuestsProgress: 5,
-  MatchdayBonuses: 7, SeasonBadges: 6, ShopItems: 6, UserInventory: 4,
+  MatchdayBonuses: 7, SeasonBadges: 6, ShopItems: 7, UserInventory: 4,
   PrivateLeagues: 8, PrivateLeagueMembers: 6,
 };
 
@@ -71,27 +69,62 @@ async function sheetsRequestWithRetry(fn, maxRetries = 5) {
 function invalidateSheetCache(sheet) {
   for (const key of [...sheetCache.keys()]) if (key.startsWith(`${sheet}!`)) sheetCache.delete(key);
 }
+
+// [SPRINT 3] Обработка отсутствующих листов
+function isMissingRangeError(e) {
+  const msg = String(e?.message || e?.cause?.message || '');
+  return e?.code === 400 && (msg.includes('Unable to parse range') || msg.includes('not found'));
+}
+
 async function getSheetData(sheet, range) {
   const k = `${sheet}!${range}`;
   const c = sheetCache.get(k);
   if (c && Date.now() < c.expiresAt) return c.data;
-  const res = await sheetsRequestWithRetry(() =>
-    sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${quoteSheetName(sheet)}!${range}` }));
-  const data = res.data.values || [];
-  sheetCache.set(k, { data, expiresAt: Date.now() + SHEET_CACHE_TTL_MS });
-  return data;
+  try {
+    const res = await sheetsRequestWithRetry(() =>
+      sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${quoteSheetName(sheet)}!${range}` }));
+    const data = res.data.values || [];
+    sheetCache.set(k, { data, expiresAt: Date.now() + SHEET_CACHE_TTL_MS });
+    return data;
+  } catch (e) {
+    if (isMissingRangeError(e)) {
+      console.warn(`⚠️ Лист «${sheet}» не найден — верну пустой массив. Запусти /api/admin/migrate-fantiki.`);
+      sheetCache.set(k, { data: [], expiresAt: Date.now() + SHEET_CACHE_TTL_MS });
+      return [];
+    }
+    throw e;
+  }
 }
+
 async function batchGetSheets(sheetRanges) {
   const ranges = sheetRanges.map(({ sheet, range }) => `${quoteSheetName(sheet)}!${range}`);
-  const res = await sheetsRequestWithRetry(() =>
-    sheets.spreadsheets.values.batchGet({ spreadsheetId: SHEET_ID, ranges }));
   const result = {};
-  (res.data.valueRanges || []).forEach((vr, i) => {
-    const { sheet, range } = sheetRanges[i];
-    const k = `${sheet}!${range}`, data = vr.values || [];
-    sheetCache.set(k, { data, expiresAt: Date.now() + SHEET_CACHE_TTL_MS });
-    result[sheet] = data;
-  });
+  try {
+    const res = await sheetsRequestWithRetry(() =>
+      sheets.spreadsheets.values.batchGet({ spreadsheetId: SHEET_ID, ranges }));
+    (res.data.valueRanges || []).forEach((vr, i) => {
+      const { sheet, range } = sheetRanges[i];
+      const k = `${sheet}!${range}`, data = vr.values || [];
+      sheetCache.set(k, { data, expiresAt: Date.now() + SHEET_CACHE_TTL_MS });
+      result[sheet] = data;
+    });
+  } catch (e) {
+    if (isMissingRangeError(e)) {
+      console.warn('⚠️ batchGet упал на отсутствующем листе — гружу листы по одному.');
+      const missing = [];
+      for (const { sheet, range } of sheetRanges) {
+        try {
+          result[sheet] = await getSheetData(sheet, range);
+        } catch (inner) {
+          if (isMissingRangeError(inner)) { result[sheet] = []; missing.push(sheet); }
+          else throw inner;
+        }
+      }
+      if (missing.length) console.warn('⚠️ Отсутствуют листы:', [...new Set(missing)].join(', '), '— запусти /api/admin/migrate-fantiki.');
+    } else {
+      throw e;
+    }
+  }
   sheetRanges.forEach(({ sheet }) => { if (!(sheet in result)) result[sheet] = []; });
   return result;
 }
@@ -197,10 +230,35 @@ async function setupSheet(sheetName, headers) {
   return { created: false, updated: true };
 }
 
+const PLAYER_AVATARS = [
+  ['ava_messi', 'Месси', 'avatar', 2000, '🐐', 'Лионель Месси · Легенда Аргентины', '/avatars/messi.png'],
+  ['ava_ronaldo', 'Роналду', 'avatar', 2000, '🚀', 'Криштиану Роналду · CR7', '/avatars/ronaldo.png'],
+  ['ava_mbappe', 'Мбаппе', 'avatar', 1800, '⚡', 'Килиан Мбаппе · Франция', '/avatars/mbappe.png'],
+  ['ava_bellingham', 'Беллингем', 'avatar', 1500, '🦁', 'Джуд Беллингем · Англия', '/avatars/bellingham.png'],
+  ['ava_yamal', 'Ямаль', 'avatar', 1500, '✨', 'Ламин Ямаль · Испания', '/avatars/yamal.png'],
+  ['ava_neymar', 'Неймар', 'avatar', 1200, '🎭', 'Неймар · Бразилия', '/avatars/neymar.png'],
+  ['ava_kane', 'Кейн', 'avatar', 1500, '🦁', 'Гарри Кейн · Капитан Англии', ''],
+  ['ava_haaland', 'Холанд', 'avatar', 1800, '🤖', 'Эрлинг Холанд · Норвегия', ''],
+  ['ava_modric', 'Модрич', 'avatar', 1200, '🎯', 'Лука Модрич · Хорватия', ''],
+  ['ava_benzema', 'Бензема', 'avatar', 1200, '🔥', 'Карим Бензема · Франция', ''],
+  ['ava_lewa', 'Левандовски', 'avatar', 1200, '⚽', 'Роберт Левандовски · Польша', ''],
+  ['ava_salah', 'Салах', 'avatar', 1200, '👑', 'Мохаммед Салах · Египет', ''],
+  ['ava_zidane', 'Зидан', 'avatar', 1500, '🏆', 'Зинедин Зидан · Легенда', ''],
+  ['ava_ronaldinho', 'Роналдиньо', 'avatar', 1500, '😎', 'Роналдиньо · Магия', ''],
+  ['ava_beckham', 'Бекхэм', 'avatar', 1200, '✨', 'Дэвид Бекхэм · Англия', ''],
+  ['ava_iniesta', 'Иньеста', 'avatar', 1200, '🎩', 'Андрес Иньеста · Испания', ''],
+  ['ava_xavi', 'Хави', 'avatar', 1200, '🧠', 'Хави Эрнандес · Испания', ''],
+  ['ava_pirlo', 'Пирло', 'avatar', 1000, '🎼', 'Андреа Пирло · Италия', ''],
+  ['ava_r9', 'Роналдо R9', 'avatar', 1500, '⚽', 'Роналдо Назарио · Феномен', ''],
+  ['ava_maradona', 'Марадона', 'avatar', 1800, '🇦🇷', 'Диего Марадона · Гений', ''],
+  ['ava_cantona', 'Кантона', 'avatar', 1000, '👑', 'Эрик Кантона · Король', ''],
+  ['ava_figo', 'Фигу', 'avatar', 1000, '💫', 'Луиш Фигу · Португалия', ''],
+];
+
 async function migrateFantiki() {
   const result = { sheetsCreated: [], columnsUpdated: [], usersInitialized: 0, predictionsInitialized: 0 };
   const newSheets = [
-    { name: 'ShopItems', headers: ['item_id','name','type','price','icon','description'] },
+    { name: 'ShopItems', headers: ['item_id','name','type','price','icon','description','image_url'] },
     { name: 'UserInventory', headers: ['user_id','item_id','is_equipped','purchased_at'] },
     { name: 'FantikiTransactions', headers: ['tx_id','user_id','amount','reason','ref_id','created_at','balance_after'] },
     { name: 'Duels', headers: ['duel_id','match_id','creator_id','stake','status','created_at','settled_at','pot','winner_ids'] },
@@ -208,7 +266,6 @@ async function migrateFantiki() {
     { name: 'QuestsProgress', headers: ['user_id','quest_id','matchday_key','completed_at','awarded'] },
     { name: 'MatchdayBonuses', headers: ['bonus_id','matchday_key','type','user_id','place','amount','awarded_at'] },
     { name: 'SeasonBadges', headers: ['badge_id','user_id','season_label','badge_key','badge_name','awarded_at'] },
-    // [SPRINT 2] Приватные лиги
     { name: 'PrivateLeagues', headers: ['league_id','name','owner_id','invite_code','created_at','is_active','description','max_members'] },
     { name: 'PrivateLeagueMembers', headers: ['member_id','league_id','user_id','joined_at','role','status'] },
   ];
@@ -244,20 +301,22 @@ async function migrateFantiki() {
   if (predUpdates.length) await batchWriteRows('Predictions', predUpdates);
 
   // Инициализация магазина
-  const shopData = await getSheetData('ShopItems', 'A:F');
-  if (shopData.length <= 1) {
-    const defaultItems = [
-      ['ava_default', 'Новичок', 'avatar', 0, '⚽', 'Стандартный аватар'],
-      ['ava_star', 'Звезда', 'avatar', 500, '🌟', 'Сияющий аватар'],
-      ['ava_king', 'Король', 'avatar', 1500, '👑', 'Королевский аватар'],
-      ['ava_fire', 'Огненный', 'avatar', 1000, '🔥', 'Горящий аватар'],
-      ['stat_pro', 'Профи', 'status', 300, '🎯', 'Статус настоящего эксперта'],
-      ['stat_risk', 'Рисковый', 'status', 800, '🎲', 'Для тех, кто любит рисковать'],
-      ['stat_legend', 'Легенда', 'status', 2000, '🏆', 'Статус для избранных'],
-      ['buff_second', 'Второй шанс', 'buff', 50, '⏱️', 'Изменить прогноз за 5 минут до матча'],
-    ];
-    await appendRows('ShopItems', defaultItems);
-  }
+  const shopData = await getSheetData('ShopItems', 'A:G');
+  const existingShopIds = new Set(shopData.slice(1).map(r => String(r[0] || '').trim()).filter(Boolean));
+  const SHOP_SEED = [
+    ['ava_default', 'Новичок', 'avatar', 0, '⚽', 'Стандартный аватар', ''],
+    ['ava_star', 'Звезда', 'avatar', 500, '🌟', 'Сияющий аватар', ''],
+    ['ava_king', 'Король', 'avatar', 1500, '👑', 'Королевский аватар', ''],
+    ['ava_fire', 'Огненный', 'avatar', 1000, '🔥', 'Горящий аватар', ''],
+    ['stat_pro', 'Профи', 'status', 300, '🎯', 'Статус настоящего эксперта', ''],
+    ['stat_risk', 'Рисковый', 'status', 800, '🎲', 'Для тех, кто любит рисковать', ''],
+    ['stat_legend', 'Легенда', 'status', 2000, '🏆', 'Статус для избранных', ''],
+    ['buff_second', 'Второй шанс', 'buff', 50, '⏱️', 'Изменить прогноз за 5 минут до матча', ''],
+    ...PLAYER_AVATARS,
+  ];
+  const missingShop = SHOP_SEED.filter(a => !existingShopIds.has(a[0]));
+  if (missingShop.length) await appendRows('ShopItems', missingShop);
+
   return result;
 }
 
@@ -389,9 +448,6 @@ const MIN_USERS_FOR_DIVISIONS = Number(process.env.MIN_USERS_FOR_DIVISIONS || 20
 const DIVISION_NAMES = ['💎 Платина', '🥇 Золото', '🥈 Серебро', '🥉 Бронза', 'Лига 5', 'Лига 6', 'Лига 7', 'Лига 8', 'Лига 9', 'Лига 10'];
 function divisionName(idx) { return DIVISION_NAMES[idx] || `Лига ${idx + 1}`; }
 
-// ============================================================
-// [SPRINT 2] ПРИВАТНЫЕ ЛИГИ — константы и хелперы
-// ============================================================
 const PRIVATE_LEAGUE_MAX_MEMBERS = Number(process.env.PRIVATE_LEAGUE_MAX_MEMBERS || 50);
 const PRIVATE_LEAGUE_MAX_OWNED = Number(process.env.PRIVATE_LEAGUE_MAX_OWNED || 3);
 const PRIVATE_LEAGUE_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -644,9 +700,6 @@ async function getPrivateLeagueView(userId, leagueId) {
     standings,
   };
 }
-// ============================================================
-// /[SPRINT 2] ПРИВАТНЫЕ ЛИГИ
-// ============================================================
 
 async function getDivisionsData() {
   const usersData = await getSheetData('Users', 'A:R');
@@ -1667,6 +1720,8 @@ async function getUserPredictionsResponse(userId, query = {}) {
 }
 
 let telegramOffset = 0, conflictCounter = 0;
+const userPredictState = new Map();
+
 async function callTelegram(method, params) {
   const url = `${TELEGRAM_API_BASE}/bot${BOT_TOKEN}/${method}`;
   const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params) });
@@ -1674,22 +1729,40 @@ async function callTelegram(method, params) {
   return r.json();
 }
 
-const MAIN_KEYBOARD = {
-  keyboard: [
-    [{ text: '⚽ Матчи' }, { text: '📊 Таблица' }],
-    [{ text: '🎯 Мои' }, { text: '💰 Баланс' }],
-    [{ text: '⚔️ Дуэли' }, { text: '❓ Помощь' }],
-  ],
-  resize_keyboard: true,
-  is_persistent: true,
-};
+function makeMainKeyboard() {
+  if (!RENDER_HOST) {
+    return {
+      keyboard: [
+        [{ text: '⚽ Матчи' }, { text: '📊 Таблица' }],
+        [{ text: '🎯 Мои' }, { text: '💰 Баланс' }],
+        [{ text: '⚔️ Дуэли' }, { text: '❓ Помощь' }],
+      ],
+      resize_keyboard: true,
+      is_persistent: true,
+    };
+  }
+  const base = `https://${RENDER_HOST}/`;
+  return {
+    keyboard: [
+      [
+        { text: '⚽ Матчи', web_app: { url: `${base}?section=matches` } },
+        { text: '🎯 Мои', web_app: { url: `${base}?section=my` } }
+      ],
+      [
+        { text: '📊 Таблица', web_app: { url: `${base}?section=table` } },
+        { text: '⚔️ Дуэли', web_app: { url: `${base}?section=duels` } }
+      ],
+      [
+        { text: '👥 Лиги', web_app: { url: `${base}?section=leagues` } },
+        { text: '❓ Помощь' }
+      ],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
+}
 
 const BTN_TO_CMD = {
-  '⚽ Матчи': 'matches',
-  '📊 Таблица': 'table',
-  '🎯 Мои': 'my',
-  '💰 Баланс': 'balance',
-  '⚔️ Дуэли': 'duels',
   '❓ Помощь': 'help',
 };
 
@@ -1753,25 +1826,51 @@ async function sendPlain(chatId, text, extra = {}) {
 async function cmdStart(msg) {
   const chatId = msg.chat.id;
   const name = msg.from?.first_name || 'друг';
-  const miniAppUrl = getMiniAppUrl();
-  const startText = `👋 Привет, ${name}!
+  const kb = makeMainKeyboard();
+  const appUrl = RENDER_HOST ? `https://${RENDER_HOST}/` : '';
 
-🏆 <b>Лига Чемпионов КБП</b> — прогнозы на матчи ЛЧ.
+  const startText = `👋 <b>Привет, ${name}!</b>
 
-Делай прогнозы, зарабатывай фантики 🪙, дерись в дуэлях ⚔️ и расти в дивизионах 💎.
+🏆 <b>Лига Чемпионов КБП</b> — прогнозы на матчи ЛЧ с фантиками, дуэлями и дивизионами.
 
-${miniAppUrl ? '👇 Открывай приложение и начинай:' : 'Открой Mini App через кнопку меню.'}`;
+<b>🎯 Как начать за 3 шага:</b>
+1️⃣ Нажми кнопку <b>«⚽ Матчи»</b> внизу экрана
+2️⃣ Выбери матч и введи счёт
+3️⃣ За угаданный результат получай фантики 🪙
 
-  const opts = { reply_markup: MAIN_KEYBOARD };
-  if (miniAppUrl) {
+<b>💡 Прогнозировать можно и прямо здесь:</b>
+Напиши боту сообщение в формате:
+<code>Реал Мадрид - Барселона 2:1</code>
+Название команд — на русском, как в матчах.
+
+<b>📚 Команды:</b>
+/matches — матчи и форматы прогнозов
+/table — таблица дивизиона
+/my — мои прогнозы
+/balance — баланс фантиков
+/rules — правила
+/help — помощь
+
+👇 <b>Или открой приложение:</b>`;
+
+  const opts = { reply_markup: kb };
+  if (appUrl) {
     opts.reply_markup = {
-      inline_keyboard: [[{ text: '🚀 Открыть приложение', url: miniAppUrl }]],
+      inline_keyboard: [
+        [{ text: '🚀 Открыть КБП', web_app: { url: appUrl } }],
+        [
+          { text: '⚽ Матчи', web_app: { url: `${appUrl}?section=matches` } },
+          { text: '🎯 Мои', web_app: { url: `${appUrl}?section=my` } }
+        ],
+        [
+          { text: '📊 Таблица', web_app: { url: `${appUrl}?section=table` } },
+          { text: '👥 Лиги', web_app: { url: `${appUrl}?section=leagues` } }
+        ],
+        [{ text: '🛒 Магазин', web_app: { url: `${appUrl}?section=shop` } }],
+      ],
     };
-    await sendPlain(chatId, startText, opts);
-    await sendPlain(chatId, 'Постоянные кнопки для быстрого доступа:', { reply_markup: MAIN_KEYBOARD });
-  } else {
-    await sendPlain(chatId, startText, opts);
   }
+  await sendPlain(chatId, startText, opts);
 }
 
 async function cmdHelp(msg) {
@@ -1892,11 +1991,17 @@ async function cmdMatches(msg) {
     text += line + '\n\n';
   });
 
-  const miniAppUrl = getMiniAppUrl('matches');
-  const opts = miniAppUrl ? {
-    reply_markup: { inline_keyboard: [[{ text: '🎯 Открыть прогнозы', url: miniAppUrl }]] },
-  } : {};
-  await sendPlain(chatId, text.trim(), opts);
+  const buttons = [];
+  const scheduledMatches = matches.filter(r => String(r[5] || '').trim() === 'scheduled');
+  scheduledMatches.slice(0, 5).forEach(m => {
+    buttons.push([{ text: `⚽ ${m[2]} — ${m[3]}`, callback_data: `pred_${m[0]}` }]);
+  });
+  
+  const appUrl = RENDER_HOST ? `https://${RENDER_HOST}/` : '';
+  if (appUrl && buttons.length < 5) buttons.push([{ text: '🎯 Открыть все', web_app: { url: `${appUrl}?section=matches` } }]);
+
+  const opts = buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {};
+  await sendPlain(chatId, text.trim() + '\n\n<b>Нажми на матч, чтобы сделать прогноз:</b>', opts);
 }
 
 async function cmdTable(msg) {
@@ -1930,9 +2035,9 @@ async function cmdTable(msg) {
 
   text += `\n\nТы: <b>#${myPos}</b> из ${myDiv.size}`;
 
-  const miniAppUrl = getMiniAppUrl('table');
-  const opts = miniAppUrl ? {
-    reply_markup: { inline_keyboard: [[{ text: '📊 Полная таблица', url: miniAppUrl }]] },
+  const appUrl = RENDER_HOST ? `https://${RENDER_HOST}/` : '';
+  const opts = appUrl ? {
+    reply_markup: { inline_keyboard: [[{ text: '📊 Полная таблица', web_app: { url: `${appUrl}?section=table` } }]] },
   } : {};
   await sendPlain(chatId, text, opts);
 }
@@ -1978,9 +2083,9 @@ async function cmdMy(msg) {
 
   if (total > 0) text += `\n📈 Угадано ${wins} из ${total} завершённых`;
 
-  const miniAppUrl = getMiniAppUrl('my');
-  const opts = miniAppUrl ? {
-    reply_markup: { inline_keyboard: [[{ text: '📋 Все прогнозы', url: miniAppUrl }]] },
+  const appUrl = RENDER_HOST ? `https://${RENDER_HOST}/` : '';
+  const opts = appUrl ? {
+    reply_markup: { inline_keyboard: [[{ text: '📋 Все прогнозы', web_app: { url: `${appUrl}?section=my` } }]] },
   } : {};
   await sendPlain(chatId, text, opts);
 }
@@ -2006,9 +2111,9 @@ async function cmdBalance(msg) {
 🎖 Уровень: ${bal.levelName}${bal.levelBonus ? ` (+${Math.round(bal.levelBonus * 100)}% к наградам)` : ''}${nextLvlStr}
 📊 Заработано за сезон: ${bal.totalEarnedSeason}`;
 
-  const miniAppUrl = getMiniAppUrl('balance');
-  const opts = miniAppUrl ? {
-    reply_markup: { inline_keyboard: [[{ text: '🛒 Магазин', url: miniAppUrl }]] },
+  const appUrl = RENDER_HOST ? `https://${RENDER_HOST}/` : '';
+  const opts = appUrl ? {
+    reply_markup: { inline_keyboard: [[{ text: '🛒 Магазин', web_app: { url: `${appUrl}?section=shop` } }]] },
   } : {};
   await sendPlain(chatId, text, opts);
 }
@@ -2032,8 +2137,8 @@ async function cmdDuels(msg) {
     if (link) buttons.push([{ text: `⚔️ Вступить · ${d.stake}🪙`, url: link }]);
   });
 
-  const miniAppUrl = getMiniAppUrl('duels');
-  if (miniAppUrl) buttons.push([{ text: '➕ Создать дуэль', url: miniAppUrl }]);
+  const appUrl = RENDER_HOST ? `https://${RENDER_HOST}/` : '';
+  if (appUrl) buttons.push([{ text: '➕ Создать дуэль', web_app: { url: `${appUrl}?section=duels` } }]);
 
   await sendPlain(chatId, text.trim(), { reply_markup: { inline_keyboard: buttons.slice(0, 6) } });
 }
@@ -2041,8 +2146,8 @@ async function cmdDuels(msg) {
 async function cmdSettings(msg) {
   const chatId = msg.chat.id;
   const text = `⚙️ <b>Настройки уведомлений</b>\n\nУправляй уведомлениями в приложении — открой «Мои прогнозы» → «⚙️ Настройки».\n\nСкоро добавим: напоминания о матчах, результаты, призовые, уровни.`;
-  const miniAppUrl = getMiniAppUrl('settings');
-  const opts = miniAppUrl ? { reply_markup: { inline_keyboard: [[{ text: '⚙️ Открыть настройки', url: miniAppUrl }]] } } : {};
+  const appUrl = RENDER_HOST ? `https://${RENDER_HOST}/` : '';
+  const opts = appUrl ? { reply_markup: { inline_keyboard: [[{ text: '⚙️ Открыть настройки', web_app: { url: `${appUrl}?section=settings` } }]] } } : {};
   await sendPlain(chatId, text, opts);
 }
 
@@ -2070,9 +2175,62 @@ function parsePredictionText(text) {
   return { home: h, away: a, homeScore: Number(m[3]), awayScore: Number(m[4]) };
 }
 
+async function processCallbackQuery(cb) {
+  const chatId = cb.message.chat.id;
+  const userId = String(cb.from.id);
+  const data = cb.data || '';
+
+  if (data.startsWith('pred_')) {
+    const matchId = data.replace('pred_', '');
+    const matchesData = await getSheetData('Matches', 'A:J');
+    const match = matchesData.find(r => String(r[0]).trim() === matchId);
+    
+    if (!match || String(match[5]).trim() !== 'scheduled') {
+      await callTelegram('answerCallbackQuery', { callback_query_id: cb.id, text: 'Матч уже недоступен', show_alert: true });
+      return;
+    }
+
+    userPredictState.set(userId, { matchId, home: match[2], away: match[3] });
+    await callTelegram('answerCallbackQuery', { callback_query_id: cb.id });
+    await sendPlain(chatId, `⚽ <b>${match[2]} — ${match[3]}</b>\n\nНапиши счёт одним сообщением (например: <code>2:1</code>)`);
+  }
+}
+
 async function processTelegramMessage(msg) {
   const chatId = msg.chat?.id, from = msg.from, text = msg.text || '';
   if (!text || !from) return;
+  const uid = String(from.id);
+
+  // Проверяем, ждем ли мы от юзера ввод счета
+  if (userPredictState.has(uid)) {
+    const state = userPredictState.get(uid);
+    const m = text.match(/^(\d{1,2})\s*[:\-]\s*(\d{1,2})$/);
+    
+    if (m) {
+      const pH = Number(m[1]);
+      const pA = Number(m[2]);
+      const pd = await getSheetData('Predictions', 'A:K');
+      const del = [];
+      pd.forEach((row, i) => { if (isDataRow(row, 'prediction_id') && String(row[1]).trim() === uid && String(row[2]).trim() === state.matchId) del.push(i); });
+      await deleteRowsByRowIndices('Predictions', del);
+      
+      await appendRows('Predictions', [[`${uid}_${state.matchId}`, uid, state.matchId, pH, pA, new Date().toISOString(), new Date().toISOString(), 0, '', 0, 'FALSE']]);
+      
+      await checkQuestsProgress(uid, getMatchdayKey(new Date().toISOString())).catch(console.error);
+      await checkReferralAward(uid).catch(console.error);
+      
+      await sendPlain(chatId, `✅ <b>Прогноз сохранен!</b>\n${state.home} <b>${pH}:${pA}</b> ${state.away}`);
+      userPredictState.delete(uid);
+      return;
+    } else if (text === 'Отмена' || text === '/cancel') {
+      userPredictState.delete(uid);
+      await sendPlain(chatId, '❌ Ввод прогноза отменен.');
+      return;
+    } else {
+      await sendPlain(chatId, '❌ Неверный формат. Напиши просто цифры, например: <code>2:1</code> или напиши <b>Отмена</b>');
+      return;
+    }
+  }
 
   if (BTN_TO_CMD[text]) {
     try { await routeCommand(msg, BTN_TO_CMD[text]); }
@@ -2088,7 +2246,7 @@ async function processTelegramMessage(msg) {
     return;
   }
 
-  const uid = String(from.id), un = from.username || '';
+  const un = from.username || '';
   const usersData = await getSheetData('Users', 'A:R');
   
   const refMatch = text.match(/^\/start\s+ref_(\d+)/);
@@ -2107,35 +2265,51 @@ async function processTelegramMessage(msg) {
     }
   }
 
+  const escB = s => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   if (!lines.length) return;
-  
+
   const matchesData = await getSheetData('Matches', 'A:J');
   const matches = matchesData.filter(r => isDataRow(r, 'match_id'));
   let pd = await getSheetData('Predictions', 'A:K');
   let saved = 0;
   const aff = new Set();
+  const okLines = [];
+  const errLines = [];
   for (const line of lines) {
     const p = parsePredictionText(line);
-    if (!p) continue;
+    if (!p) {
+      if (line.includes(':') || line.includes('-')) {
+        errLines.push(`❌ Не понял формат: <code>${escB(line)}</code>\nПример: <code>Реал Мадрид - Барселона 2:1</code>`);
+      }
+      continue;
+    }
     const hn = normalizeTeamName(p.home), an = normalizeTeamName(p.away);
     const match = matches.find(it => String(it[2] || '').toLowerCase().trim() === hn.toLowerCase() && String(it[3] || '').toLowerCase().trim() === an.toLowerCase());
-    if (!match) continue;
+    if (!match) {
+      errLines.push(`❌ Не нашёл матч: <b>${escB(p.home)} — ${escB(p.away)}</b>\nПроверь названия команд: /matches`);
+      continue;
+    }
     const mid = String(match[0]).trim(), st = String(match[5] || '').trim(), ko = new Date(match[4]);
-    if (st !== 'scheduled' || !Number.isFinite(ko.getTime()) || Date.now() >= ko.getTime()) continue;
+    if (st !== 'scheduled') { errLines.push(`⏰ Матч уже не принимает прогнозы: <b>${escB(p.home)} — ${escB(p.away)}</b> (статус: ${escB(st)})`); continue; }
+    if (!Number.isFinite(ko.getTime()) || Date.now() >= ko.getTime()) { errLines.push(`⏰ Матч уже начался: <b>${escB(p.home)} — ${escB(p.away)}</b>`); continue; }
     const del = [];
     pd.forEach((row, i) => { if (isDataRow(row, 'prediction_id') && String(row[1]).trim() === uid && String(row[2]).trim() === mid) del.push(i); });
     await deleteRowsByRowIndices('Predictions', del);
     pd = pd.filter((_, i) => !del.includes(i));
     await appendRows('Predictions', [[`${uid}_${mid}`, uid, mid, p.homeScore, p.awayScore, new Date().toISOString(), new Date().toISOString(), 0, '', 0, 'FALSE']]);
     saved++;
+    okLines.push(`✅ <b>${escB(match[2])} ${p.homeScore}:${p.awayScore} ${escB(match[3])}</b> — ${fmtKickoff(match[4])}`);
     const k = getMatchdayKey(match[4]);
     if (k) aff.add(k);
   }
   if (saved > 0) {
     for (const k of aff) { try { await checkQuestsProgress(uid, k); } catch (e) { console.error('Quest:', e.message); } }
     await checkReferralAward(uid).catch(console.error);
-    await callTelegram('sendMessage', { chat_id: chatId, text: `✅ Сохранено прогнозов: ${saved}` });
+    await sendPlain(chatId, `✅ <b>Сохранено прогнозов: ${saved}</b>\n\n${okLines.join('\n')}`);
+  }
+  if (errLines.length) {
+    await sendPlain(chatId, errLines.join('\n\n'));
   }
 }
 
@@ -2146,11 +2320,12 @@ async function startBotPolling() {
   catch (e) { console.warn('Webhook delete failed:', e.message); }
   while (true) {
     try {
-      const res = await callTelegram('getUpdates', { offset: telegramOffset, timeout: 30, allowed_updates: ['message'] });
+      const res = await callTelegram('getUpdates', { offset: telegramOffset, timeout: 30, allowed_updates: ['message', 'callback_query'] });
       if (res.ok && res.result.length > 0) {
         for (const u of res.result) {
           telegramOffset = u.update_id + 1;
           if (u.message) { try { await processTelegramMessage(u.message); } catch (e) { console.error('Msg:', e.message); } }
+          if (u.callback_query) { try { await processCallbackQuery(u.callback_query); } catch (e) { console.error('Callback:', e.message); } }
         }
       }
       conflictCounter = 0;
@@ -2171,6 +2346,7 @@ app.post(WEBHOOK_PATH, (req, res) => {
   if (req.headers['x-telegram-bot-api-secret-token'] !== WEBHOOK_SECRET) return res.status(403).json({ error: 'Forbidden' });
   res.status(200).json({ ok: true });
   if (req.body?.message) processTelegramMessage(req.body.message).catch(e => console.error('Webhook:', e.message));
+  if (req.body?.callback_query) processCallbackQuery(req.body.callback_query).catch(e => console.error('Callback:', e.message));
 });
 
 // ========== API ==========
@@ -2198,7 +2374,7 @@ app.get('/api/standings/user-division/:userId', asyncHandler(async (req, res) =>
   res.status(404).json({ error: 'User not found' });
 }));
 
-// ========== [SPRINT 2] PRIVATE LEAGUES API ==========
+// ========== PRIVATE LEAGUES ==========
 app.get('/api/private-leagues/my/:userId', asyncHandler(async (req, res) => {
   const uid = String(req.params.userId || '').trim();
   if (!uid) return res.status(400).json({ error: 'userId required' });
@@ -2244,13 +2420,12 @@ app.delete('/api/private-leagues/:leagueId', asyncHandler(async (req, res) => {
   if (!r.success) return res.status(400).json(r);
   res.json(r);
 }));
-// ========== /[SPRINT 2] PRIVATE LEAGUES API ==========
 
 // ========== SHOP ==========
 app.get('/api/shop/items/:userId', asyncHandler(async (req, res) => {
   const uid = String(req.params.userId || '').trim();
   const { ShopItems: items, UserInventory: inv } = await batchGetSheets([
-    { sheet: 'ShopItems', range: 'A:F' }, { sheet: 'UserInventory', range: 'A:D' }
+    { sheet: 'ShopItems', range: 'A:G' }, { sheet: 'UserInventory', range: 'A:D' }
   ]);
   
   const userInv = inv.filter(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
@@ -2265,6 +2440,7 @@ app.get('/api/shop/items/:userId', asyncHandler(async (req, res) => {
       price: toNum(r[3], 0),
       icon: r[4] || '',
       desc: r[5] || '',
+      imageUrl: r[6] || '',
       owned: !!owned,
       equipped: owned ? String(owned[2]).trim().toUpperCase() === 'TRUE' : false
     };
@@ -2278,7 +2454,7 @@ app.post('/api/shop/buy', asyncHandler(async (req, res) => {
   if (!uid || !itemId) return res.status(400).json({ error: 'Missing params' });
   
   const { ShopItems: items, UserInventory: inv, Users: users } = await batchGetSheets([
-    { sheet: 'ShopItems', range: 'A:F' }, { sheet: 'UserInventory', range: 'A:D' }, { sheet: 'Users', range: 'A:R' }
+    { sheet: 'ShopItems', range: 'A:G' }, { sheet: 'UserInventory', range: 'A:D' }, { sheet: 'Users', range: 'A:R' }
   ]);
   
   const item = items.find(r => isDataRow(r, 'item_id') && String(r[0]).trim() === itemId);
@@ -2304,7 +2480,7 @@ app.post('/api/shop/equip', asyncHandler(async (req, res) => {
   if (!uid || !itemId) return res.status(400).json({ error: 'Missing params' });
   
   const { ShopItems: items, UserInventory: inv } = await batchGetSheets([
-    { sheet: 'ShopItems', range: 'A:F' }, { sheet: 'UserInventory', range: 'A:D' }
+    { sheet: 'ShopItems', range: 'A:G' }, { sheet: 'UserInventory', range: 'A:D' }
   ]);
   
   const item = items.find(r => isDataRow(r, 'item_id') && String(r[0]).trim() === itemId);
@@ -2374,21 +2550,21 @@ app.get('/api/user-stats/:userId', asyncHandler(async (req, res) => {
   }
 
   const { UserInventory: inv, ShopItems: items } = await batchGetSheets([
-    { sheet: 'UserInventory', range: 'A:D' }, { sheet: 'ShopItems', range: 'A:F' }
+    { sheet: 'UserInventory', range: 'A:D' }, { sheet: 'ShopItems', range: 'A:G' }
   ]);
-  let equippedAvatar = null, equippedStatus = null;
+  let equippedAvatar = null, equippedAvatarUrl = null, equippedStatus = null;
   
   inv.forEach(r => {
     if (isDataRow(r, 'user_id') && String(r[0]).trim() === uid && String(r[2]).trim().toUpperCase() === 'TRUE') {
       const item = items.find(x => isDataRow(x, 'item_id') && String(x[0]).trim() === String(r[1]).trim());
       if (item) {
-        if (item[2] === 'avatar') equippedAvatar = item[4];
+        if (item[2] === 'avatar') { equippedAvatar = item[4]; equippedAvatarUrl = item[6] || null; }
         if (item[2] === 'status') equippedStatus = item[4] + ' ' + item[1];
       }
     }
   });
 
-  res.json({ favTeam, worstTeam, equippedAvatar, equippedStatus });
+  res.json({ favTeam, worstTeam, equippedAvatar, equippedAvatarUrl, equippedStatus });
 }));
 
 app.get('/api/h2h/:u1/:u2', asyncHandler(async (req, res) => {
@@ -2940,7 +3116,7 @@ const server = app.listen(PORT, async () => {
     const url = `https://${RENDER_HOST}${WEBHOOK_PATH}`;
     console.log(`Webhook: ${url}`);
     try {
-      await callTelegram('setWebhook', { url, allowed_updates: ['message'], drop_pending_updates: true, secret_token: WEBHOOK_SECRET });
+      await callTelegram('setWebhook', { url, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true, secret_token: WEBHOOK_SECRET });
       const info = await callTelegram('getWebhookInfo', {});
       console.log(`✅ Webhook. Pending: ${info.result?.pending_update_count || 0}`);
       setupBotUI().catch(console.error);
