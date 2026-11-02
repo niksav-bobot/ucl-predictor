@@ -34,21 +34,13 @@ function getDayKey(v) { const d = new Date(v); if (!Number.isFinite(d.getTime())
 function typeLabel(t) { return { exact: 'Точный счёт', difference: 'Разница', draw: 'Ничья', outcome: 'Исход', miss: 'Промах' }[t] || ''; }
 
 const REASON_LABELS = {
-  prediction_award: '🎯 За прогнозы',
-  prediction_correction: '↩️ Корректировка',
-  daily_streak_bonus: '🔥 Серия ТС',
-  daily_login: '📅 Вход в день матча',
-  round_prize: '🏆 Призовые за тур',
-  quest_predict_5: '📋 Квест: 5 прогнозов',
-  quest_predict_all: '📋 Квест: все прогнозы',
-  quest_first_exact: '📋 Квест: 1 ТС',
-  quest_three_outcomes: '📋 Квест: 3 исхода',
-  duel_stake: '⚔️ Ставка в дуэли',
-  duel_win: '⚔️ Выигрыш в дуэли',
-  duel_refund: '↩️ Возврат из дуэли',
-  referral_bonus: '🎁 Бонус за друга',
-  admin_grant: '👑 Начисление',
-  stars_purchase: '⭐ Покупка за Stars',
+  prediction_award: '🎯 За прогнозы', prediction_correction: '↩️ Корректировка',
+  daily_streak_bonus: '🔥 Серия ТС', daily_login: '📅 Вход в день матча',
+  round_prize: '🏆 Призовые за тур', quest_predict_5: '📋 Квест: 5 прогнозов',
+  quest_predict_all: '📋 Квест: все прогнозы', quest_first_exact: '📋 Квест: 1 ТС',
+  quest_three_outcomes: '📋 Квест: 3 исхода', duel_stake: '⚔️ Ставка в дуэли',
+  duel_win: '⚔️ Выигрыш в дуэли', duel_refund: '↩️ Возврат из дуэли',
+  referral_bonus: '🎁 Бонус за друга', admin_grant: '👑 Начисление', stars_purchase: '⭐ Покупка за Stars',
 };
 
 async function apiJson(url, options = {}) {
@@ -140,11 +132,7 @@ async function openBalanceModal() {
   let todayHtml = '';
   if (today?.date) {
     const items = Object.entries(today.breakdown || {}).filter(([, v]) => v !== 0);
-    todayHtml = `
-      <div class="today-summary">
-        <div class="today-total">${COIN_SVG} ${fmt(today.total)} <span class="muted" style="font-size:13px;font-weight:400">за ${today.date}</span></div>
-        ${items.length ? `<ul class="today-breakdown">${items.map(([r, v]) => `<li><span>${REASON_LABELS[r] || escapeHtml(r)}</span><span class="${cls(v)}">${fmt(v)}</span></li>`).join('')}</ul>` : '<div class="muted" style="padding:4px 0">Начислений ещё нет</div>'}
-      </div>`;
+    todayHtml = `<div class="today-summary"><div class="today-total">${COIN_SVG} ${fmt(today.total)} <span class="muted" style="font-size:13px;font-weight:400">за ${today.date}</span></div>${items.length ? `<ul class="today-breakdown">${items.map(([r, v]) => `<li><span>${REASON_LABELS[r] || escapeHtml(r)}</span><span class="${cls(v)}">${fmt(v)}</span></li>`).join('')}</ul>` : '<div class="muted" style="padding:4px 0">Начислений ещё нет</div>'}</div>`;
   } else {
     todayHtml = '<div class="muted" style="padding:8px 0">Нет активного игрового дня</div>';
   }
@@ -160,17 +148,10 @@ async function openBalanceModal() {
 
   const starsPacksHtml = `
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:16px;">
-      <button class="secondary-button stars-buy-btn" data-pkg="p1" style="padding:10px 4px;font-size:12px;display:flex;flex-direction:column;align-items:center;gap:4px;">
-        <span>50 ⭐</span><span style="color:var(--success);font-weight:700;">5000 🪙</span>
-      </button>
-      <button class="secondary-button stars-buy-btn" data-pkg="p2" style="padding:10px 4px;font-size:12px;display:flex;flex-direction:column;align-items:center;gap:4px;border:1px solid var(--primary);">
-        <span>100 ⭐</span><span style="color:var(--success);font-weight:700;">11000 🪙</span><span style="font-size:9px;color:var(--primary);">Выгодно</span>
-      </button>
-      <button class="secondary-button stars-buy-btn" data-pkg="p3" style="padding:10px 4px;font-size:12px;display:flex;flex-direction:column;align-items:center;gap:4px;">
-        <span>250 ⭐</span><span style="color:var(--success);font-weight:700;">30000 🪙</span>
-      </button>
-    </div>
-  `;
+      <button class="secondary-button stars-buy-btn" data-pkg="p1" style="padding:10px 4px;font-size:12px;display:flex;flex-direction:column;align-items:center;gap:4px;"><span>50 ⭐</span><span style="color:var(--success);font-weight:700;">5000 🪙</span></button>
+      <button class="secondary-button stars-buy-btn" data-pkg="p2" style="padding:10px 4px;font-size:12px;display:flex;flex-direction:column;align-items:center;gap:4px;border:1px solid var(--primary);"><span>100 ⭐</span><span style="color:var(--success);font-weight:700;">11000 🪙</span><span style="font-size:9px;color:var(--primary);">Выгодно</span></button>
+      <button class="secondary-button stars-buy-btn" data-pkg="p3" style="padding:10px 4px;font-size:12px;display:flex;flex-direction:column;align-items:center;gap:4px;"><span>250 ⭐</span><span style="color:var(--success);font-weight:700;">30000 🪙</span></button>
+    </div>`;
 
   const overlay = openModal('Баланс фантиков', `
     <div class="balance-total">Всего: <strong>${bal?.balance ?? '—'} ${COIN_SVG}</strong></div>
@@ -194,8 +175,7 @@ async function openBalanceModal() {
       btn.disabled = true;
       try {
         const { invoiceLink } = await apiJson('/api/stars/invoice', { 
-          method: 'POST', 
-          headers: { 'Content-Type': 'application/json' }, 
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, 
           body: JSON.stringify({ userId: String(userId), packageId: btn.dataset.pkg }) 
         });
         tg.openInvoice(invoiceLink, (status) => {
@@ -216,74 +196,78 @@ async function openBalanceModal() {
   });
 }
 
+async function openSettingsModal() {
+  try {
+    const cfg = await apiJson(`/api/notification-settings/${encodeURIComponent(userId)}`);
+    const html = `
+      <div style="background:rgba(255,255,255,0.04);border-radius:12px;padding:16px;margin-bottom:16px;">
+        <label style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer;">
+          <input type="checkbox" id="opt-reminder" ${cfg.reminder ? 'checked' : ''} style="width:20px;height:20px;accent-color:var(--primary);">
+          <div><div style="font-weight:600">🔔 Напоминания о матчах</div><div class="muted" style="font-size:11px">За час до начала</div></div>
+        </label>
+        <label style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer;">
+          <input type="checkbox" id="opt-results" ${cfg.results ? 'checked' : ''} style="width:20px;height:20px;accent-color:var(--primary);">
+          <div><div style="font-weight:600">🏆 Результаты</div><div class="muted" style="font-size:11px">После завершения матча</div></div>
+        </label>
+        <label style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer;">
+          <input type="checkbox" id="opt-prizes" ${cfg.prizes ? 'checked' : ''} style="width:20px;height:20px;accent-color:var(--primary);">
+          <div><div style="font-weight:600">🥇 Призовые и квесты</div><div class="muted" style="font-size:11px">Когда начислены бонусы</div></div>
+        </label>
+        <label style="display:flex;align-items:center;gap:12px;padding:10px 0;cursor:pointer;">
+          <input type="checkbox" id="opt-duels" ${cfg.duels ? 'checked' : ''} style="width:20px;height:20px;accent-color:var(--primary);">
+          <div><div style="font-weight:600">⚔️ Дуэли</div><div class="muted" style="font-size:11px">Вступления и результаты</div></div>
+        </label>
+      </div>
+      <button id="save-settings" class="primary-button full-width">Сохранить</button>
+    `;
+    const o = openModal('⚙️ Настройки уведомлений', html);
+    o.querySelector('#save-settings').onclick = async () => {
+      const b = o.querySelector('#save-settings');
+      b.disabled = true; b.textContent = 'Сохранение...';
+      try {
+        await apiJson('/api/notification-settings', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: String(userId),
+            reminder: o.querySelector('#opt-reminder').checked,
+            results: o.querySelector('#opt-results').checked,
+            prizes: o.querySelector('#opt-prizes').checked,
+            duels: o.querySelector('#opt-duels').checked,
+          })
+        });
+        showToast('Настройки сохранены', 'success');
+        closeModal();
+      } catch (e) { showToast(e.message, 'error'); b.disabled = false; b.textContent = 'Сохранить'; }
+    };
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
 function openRulesModal() {
   const html = `
     <div class="rules-text">
       <p><strong>${COIN_SVG} Фантики</strong> — внутренняя валюта. Их дают за активность, а тратить можно в дуэлях. В конце сезона баланс обнуляется, но уровень и бейджи остаются.</p>
-      
       <h4>🏆 Как начисляются очки (в турнирную таблицу)</h4>
-      <p style="margin-bottom:6px">Очки определяют твоё место в таблице и дивизионе. Они начисляются после завершения матча:</p>
       <ul>
         <li><strong>5 очков</strong> — Точный счёт (угадан и исход, и разница, и голы)</li>
-        <li><strong>3 очка</strong> — Угадана ничья (например, поставил 1:1, а матч закончился 2:2 или 0:0)</li>
-        <li><strong>3 очка</strong> — Угадана разница мячей (например, поставил 2:0, а матч закончился 3:1)</li>
-        <li><strong>1 очко</strong> — Угадан только исход (например, поставил 2:0, а матч закончился 3:0 или 1:2)</li>
-        <li><strong>0 очков</strong> — Промах (не угадан даже исход)</li>
+        <li><strong>3 очка</strong> — Угадана ничья</li>
+        <li><strong>3 очка</strong> — Угадана разница мячей</li>
+        <li><strong>1 очко</strong> — Угадан только исход</li>
+        <li><strong>0 очков</strong> — Промах</li>
       </ul>
-
       <h4>💰 За что дают фантики (за прогнозы)</h4>
-      <ul>
-        <li>Исход угадан: <strong>+10</strong></li>
-        <li>Разница угадана: <strong>+20</strong></li>
-        <li>Точный счёт: <strong>+50</strong></li>
-        <li>ТС в матче 6–7 голов: <strong>+75</strong> (бонус редкости)</li>
-        <li>ТС в матче 8+ голов: <strong>+100</strong> (бонус редкости)</li>
-      </ul>
-
-      <h4>🔥 За серию точных счетов за день</h4>
-      <ul>
-        <li>2 ТС: <strong>+25</strong></li>
-        <li>3 ТС: <strong>+75</strong></li>
-        <li>4 ТС: <strong>+150</strong></li>
-        <li>5+ ТС: <strong>+300</strong></li>
-      </ul>
-
-      <h4>📅 За вход в день матча</h4>
-      <p>Заходишь в Mini App в день с матчами → <strong>+10</strong>. Один раз в день.</p>
-
+      <ul><li>Исход: +10</li><li>Разница: +20</li><li>ТС: +50</li><li>ТС 6–7: +75</li><li>ТС 8+: +100</li></ul>
+      <h4>🔥 Серия точных счетов за день</h4>
+      <ul><li>2 ТС: +25</li><li>3 ТС: +75</li><li>4 ТС: +150</li><li>5+ ТС: +300</li></ul>
+      <h4>📅 За вход в день матча</h4><p>+10 фантиков (1 раз в день)</p>
       <h4>📋 Квесты на тур</h4>
-      <ul>
-        <li>5 прогнозов в туре: <strong>+30</strong></li>
-        <li>Все прогнозы тура: <strong>+50</strong></li>
-        <li>Хотя бы 1 ТС за тур: <strong>+20</strong></li>
-        <li>3+ исхода за тур: <strong>+15</strong></li>
-      </ul>
-
-      <h4>🏅 Призовые места в туре (по дивизионам)</h4>
-      <p>В каждом дивизионе есть свой топ-3 по очкам за игровой день:</p>
-      <ul>
-        <li>1-е место в дивизионе: <strong>+60</strong></li>
-        <li>2-е место в дивизионе: <strong>+30</strong></li>
-        <li>3-е место в дивизионе: <strong>+15</strong></li>
-      </ul>
-      <p>При равенстве очков — все получают приз своего места. Если у тебя 0 очков за тур, приз не даётся.</p>
-
-      <h4>🎁 Реферальная программа</h4>
-      <p>Пригласи друга по ссылке из своего профиля. Когда он сделает <strong>20 прогнозов</strong>, ты получишь <strong>+150</strong>.</p>
-
-      <h4>🎖 Уровни (за накопленные фантики)</h4>
-      <ul>
-        <li>Новичок (100+)</li>
-        <li>Прогнозист (500+) — <strong>+5%</strong> к наградам за прогнозы</li>
-        <li>Аналитик (1000+) — <strong>+10%</strong></li>
-        <li>Снайпер (2000+) — <strong>+15%</strong></li>
-        <li>Профи (5000+) — <strong>+25%</strong></li>
-      </ul>
-
-      <h4>⚔️ Дуэли</h4>
-      <p>Создаёшь дуэль: счёт + ставка (10–500, кратно 5). Другой игрок вступает, ставит такой же счёт (не совпадающий) и такую же ставку. 1 угадал — забирает банк. 2+ угадали — делят поровну. 0 угадали — возврат всем.</p>
-    </div>
-  `;
+      <ul><li>5 прогнозов: +30</li><li>Все прогнозы: +50</li><li>Хотя бы 1 ТС: +20</li><li>3+ исхода: +15</li></ul>
+      <h4>🏅 Призовые в дивизионе</h4>
+      <ul><li>1-е: +60</li><li>2-е: +30</li><li>3-е: +15</li></ul>
+      <h4>🎁 Рефералка</h4><p>Друг сделал 20 прогнозов → +150 тебе</p>
+      <h4>🎖 Уровни</h4>
+      <ul><li>Новичок 100+</li><li>Прогнозист 500+ (+5%)</li><li>Аналитик 1000+ (+10%)</li><li>Снайпер 2000+ (+15%)</li><li>Профи 5000+ (+25%)</li></ul>
+      <h4>⚔️ Дуэли</h4><p>Ставка 10–500. 1 угадал — забирает банк, 2+ — делят, 0 — возврат.</p>
+    </div>`;
   openModal('Правила', html);
 }
 
@@ -301,12 +285,8 @@ async function showParticipantProfile(targetUserId, displayName) {
   let statsHtml = '';
   if (statsData && (statsData.favTeam || statsData.worstTeam)) {
     statsHtml = '<div class="profile-section"><h4 class="modal-section-title" style="margin-top:0">Статистика</h4>';
-    if (statsData.favTeam) {
-      statsHtml += `<div style="margin-bottom:8px; font-size:13px">🔥 Любимая команда: <strong>${escapeHtml(statsData.favTeam.name)}</strong> <span class="muted">(${Math.round(statsData.favTeam.rate * 100)}% успеха, ${statsData.favTeam.total} матчей)</span></div>`;
-    }
-    if (statsData.worstTeam) {
-      statsHtml += `<div style="font-size:13px">💩 Не везет с: <strong>${escapeHtml(statsData.worstTeam.name)}</strong> <span class="muted">(${Math.round(statsData.worstTeam.rate * 100)}% успеха, ${statsData.worstTeam.total} матчей)</span></div>`;
-    }
+    if (statsData.favTeam) statsHtml += `<div style="margin-bottom:8px; font-size:13px">🔥 Любимая: <strong>${escapeHtml(statsData.favTeam.name)}</strong> <span class="muted">(${Math.round(statsData.favTeam.rate * 100)}%)</span></div>`;
+    if (statsData.worstTeam) statsHtml += `<div style="font-size:13px">💩 Не везет с: <strong>${escapeHtml(statsData.worstTeam.name)}</strong> <span class="muted">(${Math.round(statsData.worstTeam.rate * 100)}%)</span></div>`;
     statsHtml += '</div>';
   }
 
@@ -330,10 +310,7 @@ async function showParticipantProfile(targetUserId, displayName) {
     ${divBadge}
     <div style="display:flex; align-items:center; margin-bottom:12px;">
       ${avatarHtml}
-      <div>
-        ${statusHtml}
-        <div class="profile-balance" style="margin-bottom:0">${bal?.balance ?? '—'} ${COIN_SVG}</div>
-      </div>
+      <div>${statusHtml}<div class="profile-balance" style="margin-bottom:0">${bal?.balance ?? '—'} ${COIN_SVG}</div></div>
     </div>
     <div class="muted" style="margin-bottom:12px;">Баланс · за сезон заработано ${bal?.totalEarnedSeason ?? 0} ${COIN_SVG}</div>
     <div class="profile-level-click" id="profile-level-click">
@@ -343,16 +320,14 @@ async function showParticipantProfile(targetUserId, displayName) {
       <div class="muted" style="margin-top:6px;font-size:11px">Нажмите, чтобы увидеть все уровни</div>
     </div>
     ${statsHtml}
-    <div class="profile-section">
-      <h4 class="modal-section-title" style="margin-top:0">Бейджи</h4>
-      ${badgesHtml}
-    </div>
+    <div class="profile-section"><h4 class="modal-section-title" style="margin-top:0">Бейджи</h4>${badgesHtml}</div>
     <button id="profile-all-preds" class="primary-button full-width">Все прогнозы</button>
     <button id="profile-chart" class="secondary-button full-width" style="margin-top:8px">📊 Динамика очков</button>
     ${!isMe ? `<button id="profile-h2h" class="secondary-button full-width" style="margin-top:8px; border: 1px solid var(--primary); color: var(--primary);">⚔️ Сравнить с собой</button>` : ''}
     ${isMe ? `<button id="profile-shop" class="secondary-button full-width" style="margin-top:8px; border: 1px solid #f59e0b; color: #f59e0b;">🛒 Магазин</button>` : ''}
     ${isMe ? `<button id="profile-leagues" class="secondary-button full-width" style="margin-top:8px; border: 1px solid var(--primary); color: var(--primary);">👥 Приватные лиги</button>` : ''}
     ${isMe ? `<button id="profile-referral" class="secondary-button full-width" style="margin-top:8px; border: 1px solid var(--success); color: var(--success);">🎁 Пригласить друга (+150)</button>` : ''}
+    ${isMe ? `<button id="profile-settings" class="secondary-button full-width" style="margin-top:8px; border: 1px solid var(--muted); color: var(--muted);">⚙️ Настройки уведомлений</button>` : ''}
   `);
 
   overlay.querySelector('#profile-level-click').onclick = showLevelsModal;
@@ -366,6 +341,7 @@ async function showParticipantProfile(targetUserId, displayName) {
     overlay.querySelector('#profile-shop').onclick = openShopModal;
     overlay.querySelector('#profile-leagues').onclick = showPrivateLeaguesModal;
     overlay.querySelector('#profile-referral').onclick = showReferralModal;
+    overlay.querySelector('#profile-settings').onclick = openSettingsModal;
   }
 }
 
@@ -376,86 +352,51 @@ async function showLevelsModal() {
     const isCur = cur === l.level;
     return `<div class="level-row ${isCur ? 'level-current' : ''}"><span class="level-num">${l.level}</span><span class="level-name">${escapeHtml(l.name)}</span><span class="level-req">${l.min}+ ${COIN_SVG}</span><span class="level-bonus">${l.bonus > 0 ? `+${l.bonus}%` : '—'}</span></div>`;
   }).join('');
-  openModal('Уровни', `<div class="muted" style="margin-bottom:12px">Уровень повышается по мере накопления фантиков за сезон. Бонус прибавляется к наградам за прогнозы.</div><div class="levels-list">${html}</div>`);
+  openModal('Уровни', `<div class="muted" style="margin-bottom:12px">Уровень повышается по мере накопления фантиков за сезон.</div><div class="levels-list">${html}</div>`);
 }
 
 async function openShopModal() {
   try {
     const items = await apiJson(`/api/shop/items/${encodeURIComponent(userId)}`);
-    
     let html = '<div class="muted" style="margin-bottom:12px">Покупай атрибуты и выделяйся среди других!</div>';
-    
-    const categories = [
-      { id: 'avatar', name: 'Аватары' },
-      { id: 'status', name: 'Статусы' },
-      { id: 'buff', name: 'Бонусы' }
-    ];
+    const categories = [{ id: 'avatar', name: 'Аватары' }, { id: 'status', name: 'Статусы' }, { id: 'buff', name: 'Бонусы' }];
     
     categories.forEach(cat => {
       const catItems = items.filter(i => i.type === cat.id);
       if (!catItems.length) return;
-      
       html += `<div class="modal-section-title">${cat.name}</div>`;
       catItems.forEach(item => {
         let btn = '';
         if (item.owned) {
-          if (item.type === 'buff') {
-            btn = `<span class="muted" style="font-size:12px;">Куплен</span>`;
-          } else {
-            btn = item.equipped 
-              ? `<button class="secondary-button" style="padding:4px 8px; font-size:12px; opacity:0.5;" disabled>Надето</button>`
-              : `<button class="primary-button shop-equip-btn" data-id="${item.id}" style="padding:4px 8px; font-size:12px;">Надеть</button>`;
-          }
+          if (item.type === 'buff') btn = `<span class="muted" style="font-size:12px;">Куплен</span>`;
+          else btn = item.equipped ? `<button class="secondary-button" style="padding:4px 8px; font-size:12px; opacity:0.5;" disabled>Надето</button>` : `<button class="primary-button shop-equip-btn" data-id="${item.id}" style="padding:4px 8px; font-size:12px;">Надеть</button>`;
         } else {
           btn = `<button class="primary-button shop-buy-btn" data-id="${item.id}" data-price="${item.price}" style="padding:4px 8px; font-size:12px;">Купить за ${item.price} ${COIN_SVG}</button>`;
         }
-        
-        const imgTag = item.imageUrl 
-          ? `<img src="${escapeHtml(item.imageUrl)}" alt="" style="width:40px;height:40px;border-radius:8px;object-fit:cover;margin-right:10px;vertical-align:middle;">` 
-          : `<span style="font-size:24px;margin-right:10px;vertical-align:middle;">${item.icon}</span>`;
-
-        html += `
-          <div style="display:flex; align-items:center; justify-content:space-between; padding:10px; background:rgba(255,255,255,0.04); border-radius:8px; margin-bottom:6px;">
-            <div style="display:flex;align-items:center;">
-              ${imgTag}
-              <div>
-                <div style="font-size:15px; font-weight:600;">${escapeHtml(item.name)}</div>
-                <div class="muted" style="font-size:12px;">${escapeHtml(item.desc)}</div>
-              </div>
-            </div>
-            ${btn}
-          </div>
-        `;
+        const imgTag = item.imageUrl ? `<img src="${escapeHtml(item.imageUrl)}" alt="" style="width:40px;height:40px;border-radius:8px;object-fit:cover;margin-right:10px;vertical-align:middle;">` : `<span style="font-size:24px;margin-right:10px;vertical-align:middle;">${item.icon}</span>`;
+        html += `<div style="display:flex; align-items:center; justify-content:space-between; padding:10px; background:rgba(255,255,255,0.04); border-radius:8px; margin-bottom:6px;"><div style="display:flex;align-items:center;">${imgTag}<div><div style="font-size:15px; font-weight:600;">${escapeHtml(item.name)}</div><div class="muted" style="font-size:12px;">${escapeHtml(item.desc)}</div></div></div>${btn}</div>`;
       });
     });
-    
     const o = openModal('Магазин', html);
-    
     o.querySelectorAll('.shop-buy-btn').forEach(b => {
       b.onclick = async () => {
         if (!confirm(`Купить за ${b.dataset.price} фантиков?`)) return;
         b.disabled = true;
         try {
           await apiJson('/api/shop/buy', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: String(userId), itemId: b.dataset.id }) });
-          showToast('Куплено!', 'success');
-          await refreshHeader();
-          openShopModal();
+          showToast('Куплено!', 'success'); await refreshHeader(); openShopModal();
         } catch(e) { showToast(e.message, 'error'); b.disabled = false; }
       };
     });
-    
     o.querySelectorAll('.shop-equip-btn').forEach(b => {
       b.onclick = async () => {
         b.disabled = true;
         try {
           await apiJson('/api/shop/equip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: String(userId), itemId: b.dataset.id }) });
-          showToast('Надето!', 'success');
-          await refreshHeader();
-          openShopModal();
+          showToast('Надето!', 'success'); await refreshHeader(); openShopModal();
         } catch(e) { showToast(e.message, 'error'); b.disabled = false; }
       };
     });
-    
   } catch (e) { showToast('Ошибка магазина: ' + e.message, 'error'); }
 }
 
@@ -463,76 +404,44 @@ async function showReferralModal() {
   try {
     const info = await apiJson(`/api/referral/info/${encodeURIComponent(userId)}`);
     const html = `
-      <div class="muted" style="margin-bottom:12px;line-height:1.5">
-        Пригласи друга. Когда он сделает <strong>20 прогнозов</strong>, ты получишь <strong>+150 ${COIN_SVG}</strong>.
-      </div>
+      <div class="muted" style="margin-bottom:12px;line-height:1.5">Пригласи друга. Когда он сделает <strong>20 прогнозов</strong>, ты получишь <strong>+150 ${COIN_SVG}</strong>.</div>
       <div class="muted" style="margin-bottom:8px">Твоя ссылка:</div>
-      <div class="ref-link-box">
-        <input type="text" class="ref-link-input" id="ref-link-input" readonly value="${escapeHtml(info.link)}">
-        <button class="primary-button" id="ref-copy-btn">Копировать</button>
-      </div>
+      <div class="ref-link-box"><input type="text" class="ref-link-input" id="ref-link-input" readonly value="${escapeHtml(info.link)}"><button class="primary-button" id="ref-copy-btn">Копировать</button></div>
       <img src="${info.qrUrl}" class="ref-qr" alt="QR-код для приглашения">
       <div class="muted" style="text-align:center;margin-bottom:12px">Наведи камеру или поделись ссылкой</div>
-      <div style="display:flex;justify-content:space-between;background:rgba(255,255,255,0.04);padding:12px;border-radius:10px">
-        <div><strong>${info.completed}</strong> <span class="muted">завершили</span></div>
-        <div><strong>${info.total}</strong> <span class="muted">всего</span></div>
-      </div>
+      <div style="display:flex;justify-content:space-between;background:rgba(255,255,255,0.04);padding:12px;border-radius:10px"><div><strong>${info.completed}</strong> <span class="muted">завершили</span></div><div><strong>${info.total}</strong> <span class="muted">всего</span></div></div>
       <button class="secondary-button full-width" style="margin-top:16px" id="ref-share-btn">Поделиться в Telegram</button>
     `;
     const overlay = openModal('Пригласить друга', html);
-    
-    overlay.querySelector('#ref-copy-btn').onclick = () => {
-      navigator.clipboard.writeText(info.link).then(() => showToast('Ссылка скопирована', 'success'));
-    };
+    overlay.querySelector('#ref-copy-btn').onclick = () => navigator.clipboard.writeText(info.link).then(() => showToast('Ссылка скопирована', 'success'));
     overlay.querySelector('#ref-share-btn').onclick = () => {
       const text = encodeURIComponent('Присоединяйся к прогнозам на ЛЧ! ');
-      const url = `https://t.me/share/url?url=${encodeURIComponent(info.link)}&text=${text}`;
-      tg.openTelegramLink(url);
+      tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(info.link)}&text=${text}`);
     };
-  } catch (e) { showToast('Ошибка загрузки рефералки: ' + e.message, 'error'); }
+  } catch (e) { showToast('Ошибка загрузки: ' + e.message, 'error'); }
 }
 
 async function showPrivateLeaguesModal() {
   try {
     const leagues = await apiJson(`/api/private-leagues/my/${encodeURIComponent(userId)}`);
     let html = '<div class="muted" style="margin-bottom:12px;line-height:1.5">Создай лигу для друзей или вступи по коду. Внутри — отдельная таблица только ваших участников.</div>';
-    if (!leagues.length) {
-      html += '<div class="empty-state compact">Пока нет приватных лиг.</div>';
-    } else {
-      html += leagues.map(l => `
-        <div class="league-card">
-          <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
-            <div>
-              <div style="font-weight:700;font-size:15px">${escapeHtml(l.name)}</div>
-              <div class="muted" style="font-size:12px">${l.memberCount}/${l.maxMembers} участников · ${l.isOwner ? 'владелец' : 'участник'}</div>
-            </div>
-            <button class="primary-button league-open-btn" data-id="${escapeHtml(l.leagueId)}" style="padding:6px 10px;font-size:12px">Открыть</button>
-          </div>
-          <div class="muted" style="font-size:12px;margin-top:8px">Код: <strong>${escapeHtml(l.inviteCode)}</strong></div>
-          <div style="display:flex;gap:8px;margin-top:8px">
-            <button class="secondary-button league-copy-btn" data-code="${escapeHtml(l.inviteCode)}" style="padding:6px 10px;font-size:12px">Копировать код</button>
-          </div>
-        </div>
-      `).join('');
+    if (!leagues.length) html += '<div class="empty-state compact">Пока нет приватных лиг.</div>';
+    else {
+      html += leagues.map(l => `<div class="league-card"><div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start"><div><div style="font-weight:700;font-size:15px">${escapeHtml(l.name)}</div><div class="muted" style="font-size:12px">${l.memberCount}/${l.maxMembers} участников · ${l.isOwner ? 'владелец' : 'участник'}</div></div><button class="primary-button league-open-btn" data-id="${escapeHtml(l.leagueId)}" style="padding:6px 10px;font-size:12px">Открыть</button></div><div class="muted" style="font-size:12px;margin-top:8px">Код: <strong>${escapeHtml(l.inviteCode)}</strong></div><div style="display:flex;gap:8px;margin-top:8px"><button class="secondary-button league-copy-btn" data-code="${escapeHtml(l.inviteCode)}" style="padding:6px 10px;font-size:12px">Копировать код</button></div></div>`).join('');
     }
-    html += `<button id="league-create-btn" class="primary-button full-width">+ Создать лигу</button>
-      <button id="league-join-btn" class="secondary-button full-width" style="margin-top:8px">Вступить по коду</button>`;
+    html += `<button id="league-create-btn" class="primary-button full-width">+ Создать лигу</button><button id="league-join-btn" class="secondary-button full-width" style="margin-top:8px">Вступить по коду</button>`;
     const o = openModal('👥 Приватные лиги', html);
     o.querySelector('#league-create-btn').onclick = openCreatePrivateLeagueModal;
     o.querySelector('#league-join-btn').onclick = () => openJoinPrivateLeagueModal();
     o.querySelectorAll('.league-open-btn').forEach(b => b.onclick = () => showPrivateLeagueView(b.dataset.id));
-    o.querySelectorAll('.league-copy-btn').forEach(b => b.onclick = () => {
-      navigator.clipboard.writeText(b.dataset.code).then(() => showToast('Код скопирован', 'success'));
-    });
+    o.querySelectorAll('.league-copy-btn').forEach(b => b.onclick = () => navigator.clipboard.writeText(b.dataset.code).then(() => showToast('Код скопирован', 'success')));
   } catch (e) { showToast('Ошибка лиг: ' + e.message, 'error'); }
 }
 
 function openCreatePrivateLeagueModal() {
   const o = openModal('Создать приватную лигу', `
-    <label class="form-label">Название</label>
-    <input id="league-name" class="form-input" maxlength="40" placeholder="Например: Друзья КБП">
-    <label class="form-label">Описание (необязательно)</label>
-    <input id="league-desc" class="form-input" maxlength="200" placeholder="Коротко о лиге">
+    <label class="form-label">Название</label><input id="league-name" class="form-input" maxlength="40" placeholder="Например: Друзья КБП">
+    <label class="form-label">Описание (необязательно)</label><input id="league-desc" class="form-input" maxlength="200" placeholder="Коротко о лиге">
     <button id="league-create-submit" class="primary-button full-width">Создать</button>
   `);
   o.querySelector('#league-create-submit').onclick = async () => {
@@ -542,39 +451,28 @@ function openCreatePrivateLeagueModal() {
     const b = o.querySelector('#league-create-submit');
     b.disabled = true; b.textContent = 'Создание...';
     try {
-      const r = await apiJson('/api/private-leagues/create', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ initData, userId: String(userId), name, description }),
-      });
-      closeModal();
-      showToast('Лига создана', 'success');
-      await showPrivateLeagueView(r.leagueId);
+      const r = await apiJson('/api/private-leagues/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData, userId: String(userId), name, description }) });
+      closeModal(); showToast('Лига создана', 'success'); await showPrivateLeagueView(r.leagueId);
     } catch (e) { showToast(e.message, 'error'); b.disabled = false; b.textContent = 'Создать'; }
   };
 }
 
 function openJoinPrivateLeagueModal(prefill = '') {
   const o = openModal('Вступить в лигу', `
-    <label class="form-label">Код приглашения</label>
-    <input id="league-code" class="form-input" maxlength="12" value="${escapeHtml(prefill)}" placeholder="ABC12345" style="text-transform:uppercase">
+    <label class="form-label">Код приглашения</label><input id="league-code" class="form-input" maxlength="12" value="${escapeHtml(prefill)}" placeholder="ABC12345" style="text-transform:uppercase">
     <button id="league-join-submit" class="primary-button full-width">Вступить</button>
   `);
   o.querySelector('#league-join-submit').onclick = async () => {
     const code = o.querySelector('#league-code').value.trim();
     const b = o.querySelector('#league-join-submit');
     b.disabled = true; b.textContent = 'Вступление...';
-    try {
-      await joinPrivateLeagueByCode(code, true);
-      closeModal();
-    } catch (e) { showToast(e.message, 'error'); b.disabled = false; b.textContent = 'Вступить'; }
+    try { await joinPrivateLeagueByCode(code, true); closeModal(); }
+    catch (e) { showToast(e.message, 'error'); b.disabled = false; b.textContent = 'Вступить'; }
   };
 }
 
 async function joinPrivateLeagueByCode(code, openAfter = true) {
-  const r = await apiJson('/api/private-leagues/join', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ initData, userId: String(userId), code }),
-  });
+  const r = await apiJson('/api/private-leagues/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData, userId: String(userId), code }) });
   showToast(r.alreadyMember ? 'Вы уже в этой лиге' : 'Вы вступили в лигу', 'success');
   if (openAfter) await showPrivateLeagueView(r.leagueId);
   return r;
@@ -597,10 +495,7 @@ async function showPrivateLeagueView(leagueId) {
       <div class="muted" style="margin-bottom:10px">${escapeHtml(l.description || '')}</div>
       <div style="background:rgba(59,130,246,0.12);border-radius:10px;padding:12px;margin-bottom:12px">
         <div class="muted" style="font-size:12px">Код приглашения</div>
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:6px">
-          <strong style="font-size:20px;letter-spacing:1px">${escapeHtml(l.inviteCode)}</strong>
-          <button id="league-view-copy" class="secondary-button" style="padding:6px 10px;font-size:12px">Копировать</button>
-        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:6px"><strong style="font-size:20px;letter-spacing:1px">${escapeHtml(l.inviteCode)}</strong><button id="league-view-copy" class="secondary-button" style="padding:6px 10px;font-size:12px">Копировать</button></div>
         <div class="muted" style="font-size:12px;margin-top:6px">${l.memberCount}/${l.maxMembers} участников</div>
       </div>
       ${table}
@@ -618,18 +513,14 @@ async function showPrivateLeagueView(leagueId) {
     const leaveBtn = o.querySelector('#league-view-leave');
     if (leaveBtn) leaveBtn.onclick = async () => {
       if (!confirm('Выйти из лиги?')) return;
-      try {
-        await apiJson(`/api/private-leagues/${encodeURIComponent(l.leagueId)}/leave`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData, userId: String(userId) }) });
-        closeModal(); showToast('Вы вышли из лиги', 'success');
-      } catch (e) { showToast(e.message, 'error'); }
+      try { await apiJson(`/api/private-leagues/${encodeURIComponent(l.leagueId)}/leave`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData, userId: String(userId) }) }); closeModal(); showToast('Вы вышли из лиги', 'success'); }
+      catch (e) { showToast(e.message, 'error'); }
     };
     const delBtn = o.querySelector('#league-view-delete');
     if (delBtn) delBtn.onclick = async () => {
       if (!confirm('Удалить лигу? Она исчезнет у всех участников.')) return;
-      try {
-        await apiJson(`/api/private-leagues/${encodeURIComponent(l.leagueId)}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData, userId: String(userId) }) });
-        closeModal(); showToast('Лига удалена', 'success');
-      } catch (e) { showToast(e.message, 'error'); }
+      try { await apiJson(`/api/private-leagues/${encodeURIComponent(l.leagueId)}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData, userId: String(userId) }) }); closeModal(); showToast('Лига удалена', 'success'); }
+      catch (e) { showToast(e.message, 'error'); }
     };
   } catch (e) { showToast('Ошибка лиги: ' + e.message, 'error'); }
 }
@@ -642,30 +533,14 @@ async function showH2HModal(otherUserId, otherName) {
 
     const html = `
       <div style="display:flex; justify-content:space-between; text-align:center; margin-bottom:20px; background:rgba(255,255,255,0.05); padding:16px; border-radius:12px;">
-        <div style="flex:1">
-          <div style="font-size:16px; font-weight:700; color:var(--primary); margin-bottom:8px;">Вы</div>
-          <div style="font-size:24px; font-weight:700;">${data.matches.u1Points}</div>
-          <div class="muted" style="font-size:11px;">очков в общих матчах</div>
-          <div style="margin-top:8px; font-size:13px;">${data.matches.u1Exact} ТС</div>
-        </div>
+        <div style="flex:1"><div style="font-size:16px; font-weight:700; color:var(--primary); margin-bottom:8px;">Вы</div><div style="font-size:24px; font-weight:700;">${data.matches.u1Points}</div><div class="muted" style="font-size:11px;">очков в общих матчах</div><div style="margin-top:8px; font-size:13px;">${data.matches.u1Exact} ТС</div></div>
         <div style="display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:700; color:var(--muted);">VS</div>
-        <div style="flex:1">
-          <div style="font-size:16px; font-weight:700; color:var(--danger); margin-bottom:8px;">${escapeHtml(otherName)}</div>
-          <div style="font-size:24px; font-weight:700;">${data.matches.u2Points}</div>
-          <div class="muted" style="font-size:11px;">очков в общих матчах</div>
-          <div style="margin-top:8px; font-size:13px;">${data.matches.u2Exact} ТС</div>
-        </div>
+        <div style="flex:1"><div style="font-size:16px; font-weight:700; color:var(--danger); margin-bottom:8px;">${escapeHtml(otherName)}</div><div style="font-size:24px; font-weight:700;">${data.matches.u2Points}</div><div class="muted" style="font-size:11px;">очков в общих матчах</div><div style="margin-top:8px; font-size:13px;">${data.matches.u2Exact} ТС</div></div>
       </div>
-
       <div class="modal-section-title">Общие матчи (${data.matches.count})</div>
-      <div style="text-align:center; margin-bottom:16px; font-size:14px; font-weight:600; color:${isDrawMatches ? 'var(--muted)' : (data.matches.u1Points > data.matches.u2Points ? 'var(--success)' : 'var(--danger)')}">
-        ${data.matches.count === 0 ? 'Нет общих матчей' : (isDrawMatches ? 'Ничья по очкам' : (data.matches.u1Points > data.matches.u2Points ? 'Вы впереди' : 'Соперник впереди'))}
-      </div>
-
+      <div style="text-align:center; margin-bottom:16px; font-size:14px; font-weight:600; color:${isDrawMatches ? 'var(--muted)' : (data.matches.u1Points > data.matches.u2Points ? 'var(--success)' : 'var(--danger)')}">${data.matches.count === 0 ? 'Нет общих матчей' : (isDrawMatches ? 'Ничья по очкам' : (data.matches.u1Points > data.matches.u2Points ? 'Вы впереди' : 'Соперник впереди'))}</div>
       <div class="modal-section-title">Дуэли (${data.duels.count})</div>
-      <div style="text-align:center; font-size:14px; font-weight:600; color:${isDrawDuels ? 'var(--muted)' : (data.duels.u1Wins > data.duels.u2Wins ? 'var(--success)' : 'var(--danger)')}">
-        ${data.duels.count === 0 ? 'Дуэлей не было' : `Вы выиграли ${data.duels.u1Wins} : ${data.duels.u2Wins}`}
-      </div>
+      <div style="text-align:center; font-size:14px; font-weight:600; color:${isDrawDuels ? 'var(--muted)' : (data.duels.u1Wins > data.duels.u2Wins ? 'var(--success)' : 'var(--danger)')}">${data.duels.count === 0 ? 'Дуэлей не было' : `Вы выиграли ${data.duels.u1Wins} : ${data.duels.u2Wins}`}</div>
     `;
     openModal(`⚔️ Вы vs ${otherName}`, html);
   } catch (e) { showToast('Ошибка загрузки H2H: ' + e.message, 'error'); }
@@ -674,11 +549,7 @@ async function showH2HModal(otherUserId, otherName) {
 async function tryDailyLogin() {
   if (!userId) return;
   try {
-    const r = await apiJson('/api/daily-login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ initData, userId: String(userId) }),
-    });
+    const r = await apiJson('/api/daily-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData, userId: String(userId) }) });
     if (r.success) { showToast(`+${r.amount} за вход`, 'success'); await refreshHeader(); }
   } catch { /* молча */ }
 }
@@ -714,7 +585,7 @@ async function auth() {
           } else if (startParam === 'shop') {
             await openShopModal();
           } else if (startParam === 'settings') {
-            await openBalanceModal();
+            await openSettingsModal();
           } else if (startParam === 'matches') {
             await loadMatches();
           } else if (startParam === 'table') {
@@ -782,7 +653,7 @@ function renderFinishedMatches(container, matches) {
   const g = new Map();
   [...matches].sort((a, b) => new Date(b.kickoff_utc) - new Date(a.kickoff_utc)).forEach(m => {
     const k = getDayKey(m.kickoff_utc);
-    if (!g.has(k)) g.set(k, { label: formatDay(m.kickoff_utc), matches: [] });
+    if (!g.has(k)) g.set(k, { label: formatDayHeader(k), matches: [] });
     g.get(k).matches.push(m);
   });
   for (const grp of g.values()) {
@@ -794,18 +665,49 @@ function renderFinishedMatches(container, matches) {
   }
 }
 
+function formatDayHeader(dayKey) {
+  if (!dayKey) return 'Без даты';
+  const today = new Date(); today.setHours(0,0,0,0);
+  const tmr = new Date(today.getTime() + 86400000);
+  const yst = new Date(today.getTime() - 86400000);
+  const dKey = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  const fmt = new Date(`${dayKey}T12:00:00`).toLocaleDateString('ru-RU', { day: '2-digit', month: 'long', weekday: 'short' });
+  if (dayKey === dKey(today)) return `Сегодня · ${fmt}`;
+  if (dayKey === dKey(tmr)) return `Завтра · ${fmt}`;
+  if (dayKey === dKey(yst)) return `Вчера · ${fmt}`;
+  return fmt;
+}
+
 async function loadMatches() {
   setActiveNav('matches');
   const app = document.getElementById('app');
   app.innerHTML = '<div class="loading">Загрузка матчей…</div>';
   try {
     const matches = await apiJson(`/api/matches?userId=${encodeURIComponent(userId)}&includeFinished=true`);
-    const active = matches.filter(m => m.status !== 'finished').sort((a, b) => new Date(a.kickoff_utc) - new Date(b.kickoff_utc));
+    const upcoming = matches.filter(m => ['scheduled', 'live'].includes(m.status)).sort((a, b) => new Date(a.kickoff_utc) - new Date(b.kickoff_utc));
     const finished = matches.filter(m => m.status === 'finished');
-    app.innerHTML = `<div class="section-header"><h2>Матчи</h2><span class="badge">${active.length} актуальных</span></div><div id="active-matches"></div><button id="toggle-past-matches" class="past-toggle">${state.pastMatchesOpen ? 'Скрыть прошедшие матчи' : `Прошедшие матчи (${finished.length})`}</button><div id="past-matches" class="${state.pastMatchesOpen ? '' : 'hidden'}"></div>`;
-    const ac = document.getElementById('active-matches');
-    if (!active.length) ac.innerHTML = '<div class="empty-state">Нет предстоящих или текущих матчей.</div>';
-    else { active.forEach(m => ac.appendChild(buildMatchCard(m))); loadOddsForMatches(active).catch(() => {}); }
+
+    app.innerHTML = `<div class="section-header"><h2>Матчи</h2><span class="badge">${upcoming.length} актуальных</span></div><div id="upcoming-matches"></div><button id="toggle-past-matches" class="past-toggle">${state.pastMatchesOpen ? 'Скрыть прошедшие матчи' : `Прошедшие матчи (${finished.length})`}</button><div id="past-matches" class="${state.pastMatchesOpen ? '' : 'hidden'}"></div>`;
+
+    const ac = document.getElementById('upcoming-matches');
+    if (!upcoming.length) ac.innerHTML = '<div class="empty-state">Нет предстоящих или текущих матчей.</div>';
+    else {
+      const grouped = new Map();
+      upcoming.forEach(m => {
+        const k = getDayKey(m.kickoff_utc);
+        if (!grouped.has(k)) grouped.set(k, []);
+        grouped.get(k).push(m);
+      });
+      [...grouped.keys()].sort().forEach(k => {
+        const section = document.createElement('section');
+        section.className = 'past-day';
+        section.innerHTML = `<h3>${escapeHtml(formatDayHeader(k))}</h3>`;
+        grouped.get(k).forEach(m => section.appendChild(buildMatchCard(m)));
+        ac.appendChild(section);
+      });
+      loadOddsForMatches(upcoming).catch(() => {});
+    }
+
     const pc = document.getElementById('past-matches');
     renderFinishedMatches(pc, finished);
     document.getElementById('toggle-past-matches').onclick = () => {
@@ -881,10 +783,7 @@ async function renderDivisionsView(app) {
   const { divisions, divisionSize, totalUsers, splittingNotYetActive, minUsersForDivisions, neededForSplitting } = data;
 
   let baseHtml = `<div class="section-header"><h2>Турнирная таблица</h2><span class="badge">${totalUsers} в игре</span></div>`;
-  baseHtml += `<div class="filter-bar" style="margin-bottom: 16px;">
-    <button data-view="overall">Все</button>
-    <button data-view="divisions" class="active">По дивизионам</button>
-  </div>`;
+  baseHtml += `<div class="filter-bar" style="margin-bottom: 16px;"><button data-view="overall">Все</button><button data-view="divisions" class="active">По дивизионам</button></div>`;
 
   if (!divisions.length) {
     app.innerHTML = baseHtml + `<div class="empty-state">Пока никто не набрал очки. Дивизионы появятся, как только у участников будут результаты!</div>`;
@@ -899,24 +798,18 @@ async function renderDivisionsView(app) {
   }
 
   let html = baseHtml;
-
   if (splittingNotYetActive) {
     html += `<div class="standings-hint">Пока все в одной лиге (с очками: ${totalUsers}). Дивизионы появятся, когда наберётся ${minUsersForDivisions} активных участников (осталось ещё ${neededForSplitting}).</div>`;
   } else {
     html += `<div class="standings-hint">Участники разделены на ${divisions.length} ${divisions.length === 1 ? 'дивизион' : divisions.length < 5 ? 'дивизиона' : 'дивизионов'}. Чем выше очки — тем выше дивизион.</div>`;
   }
-
   if (myDiv && me) {
-    html += `<div style="background:rgba(59,130,246,0.15);border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:13px">
-      Вы в <strong>${escapeHtml(myDiv.name)}</strong> · #${me.position} из ${myDiv.size}
-    </div>`;
+    html += `<div style="background:rgba(59,130,246,0.15);border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:13px">Вы в <strong>${escapeHtml(myDiv.name)}</strong> · #${me.position} из ${myDiv.size}</div>`;
   }
 
   divisions.forEach(div => {
     html += `<div class="division-header">${escapeHtml(div.name)} <span class="division-badge">${div.size}</span></div>`;
-    html += `<div class="responsive-table"><table><thead><tr>
-      <th>#</th><th>Участник</th><th>Очки</th><th>Точные</th><th>Разница</th><th>Исходы</th><th>Промахи</th>
-    </tr></thead><tbody>`;
+    html += `<div class="responsive-table"><table><thead><tr><th>#</th><th>Участник</th><th>Очки</th><th>Точные</th><th>Разница</th><th>Исходы</th><th>Промахи</th></tr></thead><tbody>`;
     div.users.forEach(u => {
       const isMe = u.userId === String(userId);
       let cls = isMe ? 'division-me' : '';
@@ -925,21 +818,12 @@ async function renderDivisionsView(app) {
         else if (u.position > div.size - 2) cls += ' zone-relegation';
       }
       const nameHtml = isMe ? `${escapeHtml(u.displayName)}<span class="division-mine-badge">вы</span>` : escapeHtml(u.displayName);
-      html += `<tr class="${cls}">
-        <td>${u.position}</td>
-        <td><button class="link-button participant-link" data-uid="${escapeHtml(u.userId)}" data-name="${escapeHtml(u.displayName)}">${nameHtml}</button></td>
-        <td><button class="metric-button metric-points" data-uid="${escapeHtml(u.userId)}" data-name="${escapeHtml(u.displayName)}">${u.totalPoints}</button></td>
-        <td><button class="metric-button metric-exact" data-uid="${escapeHtml(u.userId)}" data-name="${escapeHtml(u.displayName)}">${u.exactScores}</button></td>
-        <td>${u.goalDifference}</td>
-        <td>${u.outcomes}</td>
-        <td>${u.misses}</td>
-      </tr>`;
+      html += `<tr class="${cls}"><td>${u.position}</td><td><button class="link-button participant-link" data-uid="${escapeHtml(u.userId)}" data-name="${escapeHtml(u.displayName)}">${nameHtml}</button></td><td><button class="metric-button metric-points" data-uid="${escapeHtml(u.userId)}" data-name="${escapeHtml(u.displayName)}">${u.totalPoints}</button></td><td><button class="metric-button metric-exact" data-uid="${escapeHtml(u.userId)}" data-name="${escapeHtml(u.displayName)}">${u.exactScores}</button></td><td>${u.goalDifference}</td><td>${u.outcomes}</td><td>${u.misses}</td></tr>`;
     });
     html += '</tbody></table></div>';
   });
 
   app.innerHTML = html;
-
   app.querySelectorAll('[data-view]').forEach(b => { b.onclick = () => loadStandings('', '', b.dataset.view); });
   app.querySelectorAll('.participant-link').forEach(b => { b.onclick = () => showParticipantProfile(b.dataset.uid, b.dataset.name); });
   app.querySelectorAll('.metric-points').forEach(b => { b.onclick = () => showParticipantPredictions(b.dataset.uid, b.dataset.name, 'successful'); });
@@ -957,7 +841,6 @@ async function loadStandings(sortBy = state.standingsSort.sortBy, order = state.
       await renderDivisionsView(app);
       return;
     }
-
     const params = new URLSearchParams();
     if (sortBy) params.set('sortBy', sortBy);
     if (order) params.set('order', order);

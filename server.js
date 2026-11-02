@@ -35,8 +35,9 @@ const ODDS_SPORT_KEY = process.env.ODDS_SPORT_KEY || 'soccer_uefa_champions_leag
 const ODDS_CACHE_TTL_MS = 60 * 60 * 1000;
 let oddsCache = { fetchedAt: 0, events: [] };
 
+// Расширили Users до 23 колонок (18 старых + 5 новых)
 const EXPECTED_COLUMNS = {
-  Users: 18, Predictions: 11, Matches: 10, MatchEvents: 7,
+  Users: 23, Predictions: 11, Matches: 10, MatchEvents: 7,
   FantikiTransactions: 7, Duels: 9, DuelBets: 7, QuestsProgress: 5,
   MatchdayBonuses: 7, SeasonBadges: 6, ShopItems: 7, UserInventory: 4,
   PrivateLeagues: 8, PrivateLeagueMembers: 6,
@@ -69,12 +70,10 @@ async function sheetsRequestWithRetry(fn, maxRetries = 5) {
 function invalidateSheetCache(sheet) {
   for (const key of [...sheetCache.keys()]) if (key.startsWith(`${sheet}!`)) sheetCache.delete(key);
 }
-
 function isMissingRangeError(e) {
   const msg = String(e?.message || e?.cause?.message || '');
   return e?.code === 400 && (msg.includes('Unable to parse range') || msg.includes('not found'));
 }
-
 async function getSheetData(sheet, range) {
   const k = `${sheet}!${range}`;
   const c = sheetCache.get(k);
@@ -87,14 +86,13 @@ async function getSheetData(sheet, range) {
     return data;
   } catch (e) {
     if (isMissingRangeError(e)) {
-      console.warn(`⚠️ Лист «${sheet}» не найден — верну пустой массив. Запусти /api/admin/migrate-fantiki.`);
+      console.warn(`⚠️ Лист «${sheet}» не найден — верну пустой массив.`);
       sheetCache.set(k, { data: [], expiresAt: Date.now() + SHEET_CACHE_TTL_MS });
       return [];
     }
     throw e;
   }
 }
-
 async function batchGetSheets(sheetRanges) {
   const ranges = sheetRanges.map(({ sheet, range }) => `${quoteSheetName(sheet)}!${range}`);
   const result = {};
@@ -109,20 +107,13 @@ async function batchGetSheets(sheetRanges) {
     });
   } catch (e) {
     if (isMissingRangeError(e)) {
-      console.warn('⚠️ batchGet упал на отсутствующем листе — гружу листы по одному.');
       const missing = [];
       for (const { sheet, range } of sheetRanges) {
-        try {
-          result[sheet] = await getSheetData(sheet, range);
-        } catch (inner) {
-          if (isMissingRangeError(inner)) { result[sheet] = []; missing.push(sheet); }
-          else throw inner;
-        }
+        try { result[sheet] = await getSheetData(sheet, range); }
+        catch (inner) { if (isMissingRangeError(inner)) { result[sheet] = []; missing.push(sheet); } else throw inner; }
       }
-      if (missing.length) console.warn('⚠️ Отсутствуют листы:', [...new Set(missing)].join(', '), '— запусти /api/admin/migrate-fantiki.');
-    } else {
-      throw e;
-    }
+      if (missing.length) console.warn('⚠️ Отсутствуют листы:', [...new Set(missing)].join(', '));
+    } else { throw e; }
   }
   sheetRanges.forEach(({ sheet }) => { if (!(sheet in result)) result[sheet] = []; });
   return result;
@@ -145,15 +136,31 @@ function getLevelBonus(l) { return [0, 0, 0.05, 0.10, 0.15, 0.25][l] || 0; }
 function getLevelThreshold(l) { return [0, 100, 500, 1000, 2000, 5000][l] || 0; }
 
 const LEVELS_DATA = [
-  { level: 0, name: 'Без уровня', min: 0,    bonus: 0  },
-  { level: 1, name: 'Новичок',    min: 100,  bonus: 0  },
-  { level: 2, name: 'Прогнозист', min: 500,  bonus: 5  },
-  { level: 3, name: 'Аналитик',   min: 1000, bonus: 10 },
-  { level: 4, name: 'Снайпер',    min: 2000, bonus: 15 },
-  { level: 5, name: 'Профи',      min: 5000, bonus: 25 },
+  { level: 0, name: 'Без уровня', min: 0, bonus: 0 },
+  { level: 1, name: 'Новичок', min: 100, bonus: 0 },
+  { level: 2, name: 'Прогнозист', min: 500, bonus: 5 },
+  { level: 3, name: 'Аналитик', min: 1000, bonus: 10 },
+  { level: 4, name: 'Снайпер', min: 2000, bonus: 15 },
+  { level: 5, name: 'Профи', min: 5000, bonus: 25 },
 ];
 
-function getMatchdayKey(utcDate) { const d = new Date(utcDate); if (!Number.isFinite(d.getTime())) return null; return d.toISOString().slice(0, 10); }
+function getMatchdayKey(utcDate) {
+  const d = new Date(utcDate);
+  if (!Number.isFinite(d.getTime())) return null;
+  const msk = new Date(d.getTime() + 3 * 60 * 60 * 1000);
+  return msk.toISOString().slice(0, 10);
+}
+function getDayLabelMsk(dayKey) {
+  if (!dayKey) return '';
+  const today = getMatchdayKey(new Date().toISOString());
+  const tomorrow = getMatchdayKey(new Date(Date.now() + 86400000).toISOString());
+  const yesterday = getMatchdayKey(new Date(Date.now() - 86400000).toISOString());
+  const fmt = new Date(`${dayKey}T12:00:00+03:00`).toLocaleDateString('ru-RU', { day: '2-digit', month: 'long', weekday: 'short' });
+  if (dayKey === today) return `Сегодня · ${fmt}`;
+  if (dayKey === tomorrow) return `Завтра · ${fmt}`;
+  if (dayKey === yesterday) return `Вчера · ${fmt}`;
+  return fmt;
+}
 
 async function appendRows(sheet, rows) {
   if (!rows.length) return;
@@ -200,7 +207,6 @@ async function deleteRowsByRowIndices(sheet, indexes) {
   }
   invalidateSheetCache(sheet);
 }
-
 async function setupSheet(sheetName, headers) {
   let exists = true;
   try { await sheetsRequestWithRetry(() => sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${quoteSheetName(sheetName)}!A1:A1` })); }
@@ -269,12 +275,13 @@ async function migrateFantiki() {
     { name: 'PrivateLeagueMembers', headers: ['member_id','league_id','user_id','joined_at','role','status'] },
   ];
   for (const s of newSheets) { const r = await setupSheet(s.name, s.headers); if (r.created) result.sheetsCreated.push(s.name); }
-  const usersHeaders = ['user_id','username','display_name','registration_date','points','total_predictions','successful','exact','difference','draws','outcomes','misses','fantiki_balance','total_earned_season','level','historical_earned','referred_by','referral_awarded'];
+  
+  const usersHeaders = ['user_id','username','display_name','registration_date','points','total_predictions','successful','exact','difference','draws','outcomes','misses','fantiki_balance','total_earned_season','level','historical_earned','referred_by','referral_awarded','notify_reminder','notify_results','notify_prizes','notify_duels','bot_blocked'];
   const predHeaders = ['prediction_id','user_id','match_id','predicted_home','predicted_away','created_at','updated_at','points','prediction_type','fantiki_awarded','is_starred'];
   if ((await setupSheet('Users', usersHeaders)).updated) result.columnsUpdated.push('Users');
   if ((await setupSheet('Predictions', predHeaders)).updated) result.columnsUpdated.push('Predictions');
 
-  const usersData = await getSheetData('Users', 'A:R');
+  const usersData = await getSheetData('Users', 'A:W');
   const userUpdates = [];
   usersData.forEach((row, idx) => {
     if (!isDataRow(row, 'user_id')) return;
@@ -283,6 +290,9 @@ async function migrateFantiki() {
     for (const i of [12,13,14,15]) if (p[i] === '' || p[i] == null) { p[i] = 0; ch = true; }
     if (p[16] === '' || p[16] == null) { p[16] = ''; ch = true; }
     if (p[17] === '' || p[17] == null) { p[17] = 'FALSE'; ch = true; }
+    // Настройки уведомлений
+    for (const i of [18,19,20,21]) if (p[i] === '' || p[i] == null) { p[i] = 'TRUE'; ch = true; }
+    if (p[22] === '' || p[22] == null) { p[22] = 'FALSE'; ch = true; }
     if (ch) { userUpdates.push({ rowIndex: idx, values: p }); result.usersInitialized++; }
   });
   if (userUpdates.length) await batchWriteRows('Users', userUpdates);
@@ -299,7 +309,6 @@ async function migrateFantiki() {
   });
   if (predUpdates.length) await batchWriteRows('Predictions', predUpdates);
 
-  // Инициализация магазина
   const shopData = await getSheetData('ShopItems', 'A:G');
   const existingShopIds = new Set(shopData.slice(1).map(r => String(r[0] || '').trim()).filter(Boolean));
   const SHOP_SEED = [
@@ -319,6 +328,30 @@ async function migrateFantiki() {
   return result;
 }
 
+async function notifyUser(userId, type, text) {
+  const uid = String(userId || '').trim();
+  if (!uid) return;
+  try {
+    const usersData = await getSheetData('Users', 'A:W');
+    const row = usersData.find(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
+    if (!row) return;
+    const p = padRow(row, EXPECTED_COLUMNS.Users);
+    
+    if (String(p[22]).toUpperCase() === 'TRUE') return; // Бот заблокирован
+    
+    const types = { reminder: 18, results: 19, prizes: 20, duels: 21 };
+    const idx = types[type];
+    if (idx !== undefined && String(p[idx]).toUpperCase() !== 'TRUE') return;
+
+    await callTelegram('sendMessage', { chat_id: uid, text, parse_mode: 'HTML' }).catch(e => {
+      if (e.message.includes('403')) {
+        const up = [...p]; up[22] = 'TRUE';
+        writeRow('Users', usersData.indexOf(row), up).catch(() => {});
+      }
+    });
+  } catch (e) { console.error('notifyUser error:', e.message); }
+}
+
 async function awardFantiki(userId, amount, reason, refId = '', idempotencyKey = '') {
   const amt = toNum(amount, 0);
   if (!userId || !amt) return { success: false, error: 'Invalid params' };
@@ -331,7 +364,7 @@ async function awardFantiki(userId, amount, reason, refId = '', idempotencyKey =
     if (exists) return { success: false, error: 'Already awarded', idempotent: true };
   }
 
-  const usersData = await getSheetData('Users', 'A:R');
+  const usersData = await getSheetData('Users', 'A:W');
   const userIndex = usersData.findIndex(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
   if (userIndex === -1) return { success: false, error: 'User not found' };
 
@@ -350,7 +383,7 @@ async function awardFantiki(userId, amount, reason, refId = '', idempotencyKey =
 async function getBalance(userId) {
   const uid = String(userId || '').trim();
   if (!uid) return null;
-  const usersData = await getSheetData('Users', 'A:R');
+  const usersData = await getSheetData('Users', 'A:W');
   const row = usersData.find(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
   if (!row) return null;
   const p = padRow(row, EXPECTED_COLUMNS.Users);
@@ -361,7 +394,7 @@ async function getBalance(userId) {
 
 async function checkReferralAward(userId) {
   const uid = String(userId).trim();
-  const usersData = await getSheetData('Users', 'A:R');
+  const usersData = await getSheetData('Users', 'A:W');
   const userRow = usersData.find(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
   if (!userRow) return;
   const p = padRow(userRow, EXPECTED_COLUMNS.Users);
@@ -371,7 +404,6 @@ async function checkReferralAward(userId) {
   if (referredBy && !awarded) {
     const predsData = await getSheetData('Predictions', 'A:K');
     const predCount = predsData.filter(r => isDataRow(r, 'prediction_id') && String(r[1] || '').trim() === uid).length;
-
     if (predCount >= 20) {
       const refResult = await awardFantiki(referredBy, 150, 'referral_bonus', uid, `referral|${referredBy}|${uid}`);
       if (refResult.success) {
@@ -388,10 +420,8 @@ async function checkReferralAward(userId) {
 async function getTodayBalance(userId) {
   const uid = String(userId || '').trim();
   if (!uid) return null;
-
   const matches = await getSheetData('Matches', 'A:J');
   const now = Date.now();
-
   const dayMatches = new Map();
   matches.forEach(r => {
     if (!isDataRow(r, 'match_id')) return;
@@ -400,27 +430,17 @@ async function getTodayBalance(userId) {
     if (!dayMatches.has(k)) dayMatches.set(k, []);
     dayMatches.get(k).push(r);
   });
-
   const sortedDays = [...dayMatches.keys()].sort();
   let currentMatchday = null;
-
   for (let i = 0; i < sortedDays.length; i++) {
     const dayKey = sortedDays[i];
     const day = dayMatches.get(dayKey);
     const firstMatchStart = Math.min(...day.map(r => new Date(r[4] || '').getTime()));
-    
-    if (now >= firstMatchStart) {
-      currentMatchday = dayKey;
-    } else {
-      break;
-    }
+    if (now >= firstMatchStart) { currentMatchday = dayKey; } else { break; }
   }
-
   if (!currentMatchday) return { date: null, total: 0, breakdown: {}, count: 0 };
-
   const dayStart = new Date(`${currentMatchday}T00:00:00Z`).getTime();
   const upperBound = now; 
-
   const txData = await getSheetData('FantikiTransactions', 'A:G');
   const dayTx = txData.filter(r => {
     if (!isDataRow(r, 'tx_id')) return false;
@@ -429,7 +449,6 @@ async function getTodayBalance(userId) {
     if (!Number.isFinite(t)) return false;
     return t >= dayStart && t <= upperBound;
   });
-
   const breakdown = {};
   let total = 0;
   dayTx.forEach(r => {
@@ -438,7 +457,6 @@ async function getTodayBalance(userId) {
     breakdown[reason] = (breakdown[reason] || 0) + amount;
     total += amount;
   });
-
   return { date: currentMatchday, total, breakdown, count: dayTx.length };
 }
 
@@ -456,12 +474,8 @@ function generatePrivateLeagueCode(len = 8) {
   for (let i = 0; i < len; i++) s += PRIVATE_LEAGUE_CODE_ALPHABET[Math.floor(Math.random() * PRIVATE_LEAGUE_CODE_ALPHABET.length)];
   return s;
 }
-function normalizePrivateLeagueCode(v) {
-  return String(v || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-}
-function privateLeagueInviteLink(code) {
-  return getMiniAppUrl(`league_join_${code}`);
-}
+function normalizePrivateLeagueCode(v) { return String(v || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); }
+function privateLeagueInviteLink(code) { return getMiniAppUrl(`league_join_${code}`); }
 
 async function getPrivateLeagueById(leagueId) {
   const lid = String(leagueId || '').trim();
@@ -471,79 +485,47 @@ async function getPrivateLeagueById(leagueId) {
   if (idx === -1) return null;
   const row = padRow(data[idx], EXPECTED_COLUMNS.PrivateLeagues);
   return {
-    rowIndex: idx,
-    leagueId: String(row[0] || '').trim(),
-    name: row[1] || '',
-    ownerId: String(row[2] || '').trim(),
-    inviteCode: String(row[3] || '').trim(),
-    createdAt: row[4] || '',
-    isActive: String(row[5] || '').toUpperCase() === 'TRUE',
-    description: row[6] || '',
-    maxMembers: toNum(row[7], PRIVATE_LEAGUE_MAX_MEMBERS),
+    rowIndex: idx, leagueId: String(row[0] || '').trim(), name: row[1] || '',
+    ownerId: String(row[2] || '').trim(), inviteCode: String(row[3] || '').trim(),
+    createdAt: row[4] || '', isActive: String(row[5] || '').toUpperCase() === 'TRUE',
+    description: row[6] || '', maxMembers: toNum(row[7], PRIVATE_LEAGUE_MAX_MEMBERS),
   };
 }
-
 async function getPrivateLeagueMembers(leagueId) {
   const lid = String(leagueId || '').trim();
   if (!lid) return [];
   const data = await getSheetData('PrivateLeagueMembers', 'A:F');
   return data.map((row, idx) => ({ row, idx }))
-    .filter(({ row }) => isDataRow(row, 'member_id')
-      && String(row[1] || '').trim() === lid
-      && String(row[5] || '').trim() === 'active')
+    .filter(({ row }) => isDataRow(row, 'member_id') && String(row[1] || '').trim() === lid && String(row[5] || '').trim() === 'active')
     .map(({ row }) => ({
-      memberId: String(row[0] || '').trim(),
-      leagueId: lid,
-      userId: String(row[2] || '').trim(),
-      joinedAt: row[3] || '',
-      role: String(row[4] || 'member').trim(),
-      status: 'active',
+      memberId: String(row[0] || '').trim(), leagueId: lid, userId: String(row[2] || '').trim(),
+      joinedAt: row[3] || '', role: String(row[4] || 'member').trim(), status: 'active',
     }));
 }
-
 async function getPrivateLeagueStandings(leagueId) {
   const members = await getPrivateLeagueMembers(leagueId);
-  const usersData = await getSheetData('Users', 'A:R');
+  const usersData = await getSheetData('Users', 'A:W');
   const byId = new Map();
-  usersData.forEach(r => {
-    if (!isDataRow(r, 'user_id')) return;
-    byId.set(String(r[0] || '').trim(), padRow(r, EXPECTED_COLUMNS.Users));
-  });
+  usersData.forEach(r => { if (!isDataRow(r, 'user_id')) return; byId.set(String(r[0] || '').trim(), padRow(r, EXPECTED_COLUMNS.Users)); });
   const rows = members.map(m => {
     const u = byId.get(m.userId);
     if (!u) return null;
     return {
-      userId: m.userId,
-      displayName: u[2] || u[1] || m.userId,
-      totalPoints: toNum(u[4], 0),
-      exactScores: toNum(u[7], 0),
-      goalDifference: toNum(u[8], 0),
-      draws: toNum(u[9], 0),
-      outcomes: toNum(u[10], 0),
-      misses: toNum(u[11], 0),
+      userId: m.userId, displayName: u[2] || u[1] || m.userId,
+      totalPoints: toNum(u[4], 0), exactScores: toNum(u[7], 0), goalDifference: toNum(u[8], 0),
+      draws: toNum(u[9], 0), outcomes: toNum(u[10], 0), misses: toNum(u[11], 0),
       levelName: levelToName(toNum(u[14], 0)),
     };
   }).filter(Boolean);
-
-  rows.sort((a, b) =>
-    b.totalPoints - a.totalPoints ||
-    b.exactScores - a.exactScores ||
-    b.goalDifference - a.goalDifference ||
-    b.draws - a.draws ||
-    b.outcomes - a.outcomes ||
-    a.misses - b.misses ||
-    a.displayName.localeCompare(b.displayName, 'ru')
-  );
+  rows.sort((a, b) => b.totalPoints - a.totalPoints || b.exactScores - a.exactScores || b.goalDifference - a.goalDifference || b.draws - a.draws || b.outcomes - a.outcomes || a.misses - b.misses || a.displayName.localeCompare(b.displayName, 'ru'));
   rows.forEach((r, i) => r.position = i + 1);
   return rows;
 }
-
 async function getPrivateLeaguesForUser(userId) {
   const uid = String(userId || '').trim();
   if (!uid) return [];
   const { PrivateLeagues: ls, PrivateLeagueMembers: ms } = await batchGetSheets([
-    { sheet: 'PrivateLeagues', range: 'A:H' },
-    { sheet: 'PrivateLeagueMembers', range: 'A:F' },
+    { sheet: 'PrivateLeagues', range: 'A:H' }, { sheet: 'PrivateLeagueMembers', range: 'A:F' },
   ]);
   const activeLeagues = new Map();
   ls.forEach(r => {
@@ -570,41 +552,26 @@ async function getPrivateLeaguesForUser(userId) {
     const members = membersByLeague.get(lid) || [];
     const code = String(l[3] || '').trim();
     result.push({
-      leagueId: lid,
-      name: l[1] || '',
-      description: l[6] || '',
-      ownerId: String(l[2] || '').trim(),
-      inviteCode: code,
-      inviteLink: privateLeagueInviteLink(code),
-      memberCount: members.length,
-      maxMembers: toNum(l[7], PRIVATE_LEAGUE_MAX_MEMBERS),
-      role: String(r[4] || 'member').trim(),
-      isOwner: String(l[2] || '').trim() === uid,
-      createdAt: l[4] || '',
+      leagueId: lid, name: l[1] || '', description: l[6] || '',
+      ownerId: String(l[2] || '').trim(), inviteCode: code, inviteLink: privateLeagueInviteLink(code),
+      memberCount: members.length, maxMembers: toNum(l[7], PRIVATE_LEAGUE_MAX_MEMBERS),
+      role: String(r[4] || 'member').trim(), isOwner: String(l[2] || '').trim() === uid, createdAt: l[4] || '',
     });
   });
   result.sort((a, b) => (new Date(b.createdAt).getTime() || 0) - (new Date(a.createdAt).getTime() || 0));
   return result;
 }
-
 async function createPrivateLeague(userId, name, description = '') {
   const uid = String(userId || '').trim();
   const nm = String(name || '').trim().replace(/\s+/g, ' ');
   if (!uid) return { success: false, error: 'Unauthorized' };
   if (nm.length < 3 || nm.length > 40) return { success: false, error: 'Название 3–40 символов' };
-  const { PrivateLeagues: ls, PrivateLeagueMembers: ms } = await batchGetSheets([
-    { sheet: 'PrivateLeagues', range: 'A:H' },
-    { sheet: 'PrivateLeagueMembers', range: 'A:F' },
-  ]);
-  const owned = ls.filter(r => isDataRow(r, 'league_id')
-    && String(r[2] || '').trim() === uid
-    && String(r[5] || '').toUpperCase() === 'TRUE').length;
+  const { PrivateLeagues: ls, PrivateLeagueMembers: ms } = await batchGetSheets([{ sheet: 'PrivateLeagues', range: 'A:H' }, { sheet: 'PrivateLeagueMembers', range: 'A:F' }]);
+  const owned = ls.filter(r => isDataRow(r, 'league_id') && String(r[2] || '').trim() === uid && String(r[5] || '').toUpperCase() === 'TRUE').length;
   if (owned >= PRIVATE_LEAGUE_MAX_OWNED) return { success: false, error: `Максимум ${PRIVATE_LEAGUE_MAX_OWNED} созданных лиг` };
-
   const activeCodes = new Set(ls.filter(r => isDataRow(r, 'league_id') && String(r[5] || '').toUpperCase() === 'TRUE').map(r => String(r[3] || '').trim().toUpperCase()));
   let code = generatePrivateLeagueCode();
   while (activeCodes.has(code)) code = generatePrivateLeagueCode();
-
   const now = new Date().toISOString();
   const leagueId = `league_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const memberId = `plm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -612,28 +579,18 @@ async function createPrivateLeague(userId, name, description = '') {
   await appendRows('PrivateLeagueMembers', [[memberId, leagueId, uid, now, 'owner', 'active']]);
   return { success: true, leagueId, inviteCode: code, inviteLink: privateLeagueInviteLink(code) };
 }
-
 async function joinPrivateLeagueByCode(userId, code) {
   const uid = String(userId || '').trim();
   const c = normalizePrivateLeagueCode(code);
   if (!uid) return { success: false, error: 'Unauthorized' };
   if (!c) return { success: false, error: 'Укажите код' };
-  const { PrivateLeagues: ls, PrivateLeagueMembers: ms } = await batchGetSheets([
-    { sheet: 'PrivateLeagues', range: 'A:H' },
-    { sheet: 'PrivateLeagueMembers', range: 'A:F' },
-  ]);
-  const idx = ls.findIndex(r => isDataRow(r, 'league_id')
-    && String(r[5] || '').toUpperCase() === 'TRUE'
-    && String(r[3] || '').trim().toUpperCase() === c);
+  const { PrivateLeagues: ls, PrivateLeagueMembers: ms } = await batchGetSheets([{ sheet: 'PrivateLeagues', range: 'A:H' }, { sheet: 'PrivateLeagueMembers', range: 'A:F' }]);
+  const idx = ls.findIndex(r => isDataRow(r, 'league_id') && String(r[5] || '').toUpperCase() === 'TRUE' && String(r[3] || '').trim().toUpperCase() === c);
   if (idx === -1) return { success: false, error: 'Код не найден' };
   const l = padRow(ls[idx], EXPECTED_COLUMNS.PrivateLeagues);
   const lid = String(l[0] || '').trim();
   const max = toNum(l[7], PRIVATE_LEAGUE_MAX_MEMBERS);
-  const members = ms.filter((row) =>
-    isDataRow(row, 'member_id')
-    && String(row[1] || '').trim() === lid
-    && String(row[5] || '').trim() === 'active'
-  );
+  const members = ms.filter((row) => isDataRow(row, 'member_id') && String(row[1] || '').trim() === lid && String(row[5] || '').trim() === 'active');
   const existing = members.find((row) => String(row[2] || '').trim() === uid);
   if (existing) return { success: true, leagueId: lid, inviteCode: c, inviteLink: privateLeagueInviteLink(c), alreadyMember: true };
   if (members.length >= max) return { success: false, error: 'В лиге уже максимум участников' };
@@ -642,7 +599,6 @@ async function joinPrivateLeagueByCode(userId, code) {
   await appendRows('PrivateLeagueMembers', [[memberId, lid, uid, now, 'member', 'active']]);
   return { success: true, leagueId: lid, inviteCode: c, inviteLink: privateLeagueInviteLink(c) };
 }
-
 async function leavePrivateLeague(userId, leagueId) {
   const uid = String(userId || '').trim();
   const lid = String(leagueId || '').trim();
@@ -650,17 +606,13 @@ async function leavePrivateLeague(userId, leagueId) {
   if (!l || !l.isActive) return { success: false, error: 'Лига не найдена' };
   if (l.ownerId === uid) return { success: false, error: 'Владелец не может выйти. Удалите лигу.' };
   const ms = await getSheetData('PrivateLeagueMembers', 'A:F');
-  const idx = ms.findIndex(r => isDataRow(r, 'member_id')
-    && String(r[1] || '').trim() === lid
-    && String(r[2] || '').trim() === uid
-    && String(r[5] || '').trim() === 'active');
+  const idx = ms.findIndex(r => isDataRow(r, 'member_id') && String(r[1] || '').trim() === lid && String(r[2] || '').trim() === uid && String(r[5] || '').trim() === 'active');
   if (idx === -1) return { success: false, error: 'Вы не в лиге' };
   const upd = padRow(ms[idx], EXPECTED_COLUMNS.PrivateLeagueMembers);
   upd[5] = 'left';
   await writeRow('PrivateLeagueMembers', idx, upd);
   return { success: true };
 }
-
 async function deletePrivateLeague(userId, leagueId) {
   const uid = String(userId || '').trim();
   const l = await getPrivateLeagueById(leagueId);
@@ -672,7 +624,6 @@ async function deletePrivateLeague(userId, leagueId) {
   await writeRow('PrivateLeagues', l.rowIndex, upd);
   return { success: true };
 }
-
 async function getPrivateLeagueView(userId, leagueId) {
   const uid = String(userId || '').trim();
   const l = await getPrivateLeagueById(leagueId);
@@ -684,39 +635,23 @@ async function getPrivateLeagueView(userId, leagueId) {
   return {
     success: true,
     league: {
-      leagueId: l.leagueId,
-      name: l.name,
-      description: l.description,
-      ownerId: l.ownerId,
-      inviteCode: l.inviteCode,
-      inviteLink: privateLeagueInviteLink(l.inviteCode),
-      memberCount: members.length,
-      maxMembers: l.maxMembers,
-      isOwner: l.ownerId === uid,
-      role: my.role,
-      createdAt: l.createdAt,
+      leagueId: l.leagueId, name: l.name, description: l.description, ownerId: l.ownerId,
+      inviteCode: l.inviteCode, inviteLink: privateLeagueInviteLink(l.inviteCode),
+      memberCount: members.length, maxMembers: l.maxMembers, isOwner: l.ownerId === uid, role: my.role, createdAt: l.createdAt,
     },
     standings,
   };
 }
 
 async function getDivisionsData() {
-  const usersData = await getSheetData('Users', 'A:R');
+  const usersData = await getSheetData('Users', 'A:W');
   const users = usersData.filter(row => isDataRow(row, 'user_id')).map(row => ({
-    userId: String(row[0] || '').trim(),
-    username: row[1] || '',
-    displayName: row[2] || row[1] || 'User',
-    totalPoints: toNum(row[4], 0),
-    successfulPredictions: toNum(row[6], 0),
-    exactScores: toNum(row[7], 0),
-    goalDifference: toNum(row[8], 0),
-    draws: toNum(row[9], 0),
-    outcomes: toNum(row[10], 0),
-    misses: toNum(row[11], 0),
-    level: toNum(row[14], 0),
-    levelName: levelToName(toNum(row[14], 0)),
+    userId: String(row[0] || '').trim(), username: row[1] || '', displayName: row[2] || row[1] || 'User',
+    totalPoints: toNum(row[4], 0), successfulPredictions: toNum(row[6], 0),
+    exactScores: toNum(row[7], 0), goalDifference: toNum(row[8], 0),
+    draws: toNum(row[9], 0), outcomes: toNum(row[10], 0), misses: toNum(row[11], 0),
+    level: toNum(row[14], 0), levelName: levelToName(toNum(row[14], 0)),
   })).filter(u => u.userId && u.totalPoints > 0);
-
   users.sort((a, b) => {
     if (b.totalPoints !== a.totalPoints) return b.totalPoints - a.totalPoints;
     if (b.exactScores !== a.exactScores) return b.exactScores - a.exactScores;
@@ -726,43 +661,18 @@ async function getDivisionsData() {
     if (a.misses !== b.misses) return a.misses - b.misses;
     return String(a.userId).localeCompare(String(b.userId), 'ru', { numeric: true });
   });
-
   const N = users.length;
   if (!N) return { divisions: [], divisionSize: DIVISION_SIZE, totalUsers: 0, numDivisions: 0, minUsersForDivisions: MIN_USERS_FOR_DIVISIONS, splittingNotYetActive: false };
-
   if (N < MIN_USERS_FOR_DIVISIONS) {
-    return {
-      divisions: [{
-        division: 1,
-        name: '🏆 Общая лига',
-        size: N,
-        users: users.map((u, i) => ({ ...u, position: i + 1 })),
-      }],
-      divisionSize: DIVISION_SIZE,
-      totalUsers: N,
-      numDivisions: 1,
-      minUsersForDivisions: MIN_USERS_FOR_DIVISIONS,
-      splittingNotYetActive: true,
-      neededForSplitting: MIN_USERS_FOR_DIVISIONS - N,
-    };
+    return { divisions: [{ division: 1, name: '🏆 Общая лига', size: N, users: users.map((u, i) => ({ ...u, position: i + 1 })) }], divisionSize: DIVISION_SIZE, totalUsers: N, numDivisions: 1, minUsersForDivisions: MIN_USERS_FOR_DIVISIONS, splittingNotYetActive: true, neededForSplitting: MIN_USERS_FOR_DIVISIONS - N };
   }
-
   const numDivisions = Math.max(1, Math.ceil(N / DIVISION_SIZE));
-  const baseSize = Math.floor(N / numDivisions);
-  const remainder = N % numDivisions;
-
-  const divisions = [];
-  let cursor = 0;
+  const baseSize = Math.floor(N / numDivisions), remainder = N % numDivisions;
+  const divisions = []; let cursor = 0;
   for (let d = 0; d < numDivisions; d++) {
     const size = baseSize + (d < remainder ? 1 : 0);
-    const chunk = users.slice(cursor, cursor + size);
-    cursor += size;
-    divisions.push({
-      division: d + 1,
-      name: divisionName(d),
-      size: chunk.length,
-      users: chunk.map((u, i) => ({ ...u, position: i + 1 })),
-    });
+    const chunk = users.slice(cursor, cursor + size); cursor += size;
+    divisions.push({ division: d + 1, name: divisionName(d), size: chunk.length, users: chunk.map((u, i) => ({ ...u, position: i + 1 })) });
   }
   return { divisions, divisionSize: DIVISION_SIZE, totalUsers: N, numDivisions, minUsersForDivisions: MIN_USERS_FOR_DIVISIONS, splittingNotYetActive: false };
 }
@@ -846,7 +756,6 @@ function extractAuthenticatedUser(req) {
   }
   return null;
 }
-
 function extractUserId(req) {
   const u = extractAuthenticatedUser(req);
   if (u?.id) return u.id;
@@ -857,7 +766,6 @@ function extractUserId(req) {
   }
   return null;
 }
-
 function requireAdmin(req, res, next) {
   const key = req.headers['x-admin-api-key'] || req.body?.apiKey;
   if (ADMIN_API_KEY && key === ADMIN_API_KEY) return next();
@@ -1039,6 +947,11 @@ async function joinDuel(userId, duelId, ph, pa) {
   const upd = padRow(duel, EXPECTED_COLUMNS.Duels);
   upd[7] = newPot; upd[4] = newSt;
   await writeRow('Duels', dIdx, upd);
+
+  // Уведомление создателю
+  const creatorName = (await getSheetData('Users', 'A:W')).find(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid)?.[2] || 'Игрок';
+  await notifyUser(creatorId, 'duels', `⚔️ <b>${creatorName}</b> вступил в твою дуэль на матч <b>${match[2]} — ${match[3]}</b>.\nСтавка: ${s} 🪙, банк теперь ${newPot} 🪙.`);
+
   return { success: true, betId, newBalance: escrow.newBalance };
 }
 
@@ -1083,6 +996,7 @@ async function settleDuel(duelId, hs, as) {
       await awardFantiki(uid, s, 'duel_refund', did, `duel_refund|${did}|${uid}`);
       const u = padRow(row, EXPECTED_COLUMNS.DuelBets); u[6] = 'refunded';
       await writeRow('DuelBets', idx, u);
+      await notifyUser(uid, 'duels', `⚔️ Дуэль завершена. Никто не угадал точный счёт. Твоя ставка ${s} 🪙 возвращена.`);
     }
   } else {
     const share = Math.floor(pot / winners.length);
@@ -1095,11 +1009,13 @@ async function settleDuel(duelId, hs, as) {
       const u = padRow(row, EXPECTED_COLUMNS.DuelBets); u[6] = 'winner';
       await writeRow('DuelBets', idx, u);
       winnerIds.push(uid);
+      await notifyUser(uid, 'duels', `🏆 Ты выиграл дуэль! Начислено <b>${amount} 🪙</b>.`);
     }
     for (const { row, idx } of bets) {
       if (winners.some(w => w.idx === idx)) continue;
       const u = padRow(row, EXPECTED_COLUMNS.DuelBets); u[6] = 'loser';
       await writeRow('DuelBets', idx, u);
+      await notifyUser(String(row[2] || '').trim(), 'duels', `⚔️ Дуэль проиграна. Удачи в следующий раз!`);
     }
   }
   const upd = padRow(duel, EXPECTED_COLUMNS.Duels);
@@ -1123,6 +1039,7 @@ async function refundDuel(duelId, reason) {
     await awardFantiki(uid, s, 'duel_refund', did, `duel_refund|${did}|${uid}`);
     const u = padRow(row, EXPECTED_COLUMNS.DuelBets); u[6] = 'refunded';
     await writeRow('DuelBets', idx, u);
+    await notifyUser(uid, 'duels', `⚔️ Дуэль отменена. Ставка ${s} 🪙 возвращена.`);
   }
   const upd = padRow(duel, EXPECTED_COLUMNS.Duels);
   upd[4] = 'refunded'; upd[6] = new Date().toISOString();
@@ -1171,7 +1088,7 @@ async function settleAllPendingDuels() {
 async function listOpenDuels() {
   const { Duels: ds, DuelBets: bs, Matches: ms, Users: us } = await batchGetSheets([
     { sheet: 'Duels', range: 'A:I' }, { sheet: 'DuelBets', range: 'A:G' },
-    { sheet: 'Matches', range: 'A:J' }, { sheet: 'Users', range: 'A:R' },
+    { sheet: 'Matches', range: 'A:J' }, { sheet: 'Users', range: 'A:W' },
   ]);
   const mMap = new Map(), uMap = new Map();
   ms.forEach(r => { if (isDataRow(r, 'match_id')) mMap.set(String(r[0]).trim(), r); });
@@ -1188,11 +1105,9 @@ async function listOpenDuels() {
     if (!m || String(m[5] || '').trim() !== 'scheduled') continue;
     const bets = betsByDuel.get(did) || [];
     result.push({
-      duel_id: did, match_id: mid,
-      home_team: m[2] || '', away_team: m[3] || '', kickoff_utc: m[4] || '', stage: m[1] || '',
+      duel_id: did, match_id: mid, home_team: m[2] || '', away_team: m[3] || '', kickoff_utc: m[4] || '', stage: m[1] || '',
       creator_id: String(d[2] || '').trim(), creator_name: uMap.get(String(d[2] || '').trim()) || '',
-      stake: toNum(d[3], 0), status: st, pot: toNum(d[7], 0),
-      participants_count: bets.length,
+      stake: toNum(d[3], 0), status: st, pot: toNum(d[7], 0), participants_count: bets.length,
       participants: bets.map(b => ({ userId: String(b[2] || '').trim(), displayName: uMap.get(String(b[2] || '').trim()) || '', predictedHome: toNum(b[3], 0), predictedAway: toNum(b[4], 0) })),
       created_at: d[5] || '',
     });
@@ -1205,13 +1120,12 @@ async function listMyDuels(userId) {
   const uid = String(userId).trim();
   const { Duels: ds, DuelBets: bs, Matches: ms, Users: us } = await batchGetSheets([
     { sheet: 'Duels', range: 'A:I' }, { sheet: 'DuelBets', range: 'A:G' },
-    { sheet: 'Matches', range: 'A:J' }, { sheet: 'Users', range: 'A:R' },
+    { sheet: 'Matches', range: 'A:J' }, { sheet: 'Users', range: 'A:W' },
   ]);
   const mMap = new Map(), uMap = new Map();
   ms.forEach(r => { if (isDataRow(r, 'match_id')) mMap.set(String(r[0]).trim(), r); });
   us.forEach(r => { if (isDataRow(r, 'user_id')) uMap.set(String(r[0]).trim(), r[2] || r[1] || r[0]); });
-  const myBetByDuel = new Map();
-  const betsByDuel = new Map();
+  const myBetByDuel = new Map(), betsByDuel = new Map();
   bs.forEach(b => {
     if (!isDataRow(b, 'bet_id')) return;
     const did = String(b[1] || '').trim();
@@ -1230,8 +1144,7 @@ async function listMyDuels(userId) {
     const myBet = myBetByDuel.get(did);
     const bets = betsByDuel.get(did) || [];
     result.push({
-      duel_id: did, match_id: mid,
-      home_team: m[2] || '', away_team: m[3] || '', kickoff_utc: m[4] || '', stage: m[1] || '',
+      duel_id: did, match_id: mid, home_team: m[2] || '', away_team: m[3] || '', kickoff_utc: m[4] || '', stage: m[1] || '',
       home_score: toScore(m[6]), away_score: toScore(m[7]), match_status: m[5] || '',
       creator_id: String(d[2] || '').trim(), creator_name: uMap.get(String(d[2] || '').trim()) || '',
       stake: toNum(d[3], 0), status: String(d[4] || '').trim(), pot: toNum(d[7], 0),
@@ -1270,7 +1183,13 @@ async function checkMatchdayStreakBonus(matchdayKey) {
   for (const [uid, cnt] of cnts) {
     let b = 0;
     if (cnt >= 5) b = 300; else if (cnt === 4) b = 150; else if (cnt === 3) b = 75; else if (cnt === 2) b = 25;
-    if (b > 0) { const r = await awardFantiki(uid, b, 'daily_streak_bonus', matchdayKey, `daily_streak|${matchdayKey}|${uid}`); if (r.success) { total += b; awarded++; } }
+    if (b > 0) { 
+      const r = await awardFantiki(uid, b, 'daily_streak_bonus', matchdayKey, `daily_streak|${matchdayKey}|${uid}`); 
+      if (r.success) { 
+        total += b; awarded++; 
+        await notifyUser(uid, 'prizes', `🔥 Бонус за серию ТС! Ты угадал ${cnt} точных счетов за день. Начислено <b>+${b} 🪙</b>.`);
+      } 
+    }
   }
   await appendRows('MatchdayBonuses', [[`bonus_streak_${matchdayKey}`, matchdayKey, 'streak', '', '', total, new Date().toISOString()]]);
   return { matchdayKey, awardedCount: awarded, totalBonus: total };
@@ -1309,7 +1228,6 @@ async function checkRoundPrizes(matchdayKey) {
 
   const divData = await getDivisionsData();
   const prizes = new Map();
-
   const rewards = { 1: 60, 2: 30, 3: 15 };
 
   for (const div of divData.divisions) {
@@ -1338,15 +1256,14 @@ async function checkRoundPrizes(matchdayKey) {
   for (const [uid, { place, amount, divName }] of prizes) {
     const r = await awardFantiki(uid, amount, 'round_prize', matchdayKey, `round_prize|${matchdayKey}|${uid}`);
     if (r.success) {
-      total += amount;
-      awarded++;
+      total += amount; awarded++;
       rows.push([`bonus_prize_${matchdayKey}_${uid}`, matchdayKey, 'round_prize', uid, place, amount, new Date().toISOString()]);
+      await notifyUser(uid, 'prizes', `🏆 Призовые за тур!\nТы занял <b>${place}-е место</b> в дивизионе «${divName}». Начислено <b>+${amount} 🪙</b>.`);
     }
   }
 
   if (rows.length) await appendRows('MatchdayBonuses', rows);
   await appendRows('MatchdayBonuses', [[`bonus_prize_marker_${matchdayKey}`, matchdayKey, 'round_prize', '', '', total, new Date().toISOString()]]);
-  
   return { matchdayKey, awardedCount: awarded, totalAwarded: total };
 }
 
@@ -1382,12 +1299,21 @@ async function checkQuestsProgress(userId, matchdayKey) {
   const lm = getLatestPredictionMap(p);
   const up = [...lm.values()].map(it => p[it.idx]).filter(r => r && String(r[1] || '').trim() === userId && ids.has(String(r[2] || '').trim()));
   const has = qid => q.some(r => isDataRow(r, 'user_id') && String(r[0] || '').trim() === userId && String(r[1] || '').trim() === qid && String(r[2] || '').trim() === matchdayKey);
-  const award = async (qid, amt) => { if (has(qid)) return; await awardFantiki(userId, amt, `quest_${qid}`, matchdayKey, `quest|${qid}|${matchdayKey}|${userId}`); await appendRows('QuestsProgress', [[userId, qid, matchdayKey, new Date().toISOString(), amt]]); };
-  if (up.length >= 5) await award('predict_5', 30);
-  if (dm.length > 0 && up.length >= dm.length) await award('predict_all', 50);
-  if (up.some(r => String(r[8] || '').trim() === 'exact')) await award('first_exact', 20);
+  
+  const award = async (qid, amt, label) => { 
+    if (has(qid)) return; 
+    const r = await awardFantiki(userId, amt, `quest_${qid}`, matchdayKey, `quest|${qid}|${matchdayKey}|${userId}`); 
+    if (r.success) {
+      await appendRows('QuestsProgress', [[userId, qid, matchdayKey, new Date().toISOString(), amt]]); 
+      await notifyUser(userId, 'prizes', `📋 Выполнен квест: <b>${label}</b>. Начислено <b>+${amt} 🪙</b>.`);
+    }
+  };
+
+  if (up.length >= 5) await award('predict_5', 30, '5 прогнозов за тур');
+  if (dm.length > 0 && up.length >= dm.length) await award('predict_all', 50, 'Все прогнозы тура');
+  if (up.some(r => String(r[8] || '').trim() === 'exact')) await award('first_exact', 20, 'Хотя бы 1 ТС');
   const oc = up.filter(r => ['outcome','difference','exact','draw'].includes(String(r[8] || '').trim())).length;
-  if (oc >= 3) await award('three_outcomes', 15);
+  if (oc >= 3) await award('three_outcomes', 15, '3+ исхода');
 }
 
 async function calculateSeasonTitles() {
@@ -1451,12 +1377,13 @@ async function recalculatePointsForMatch(matchId, hs, as) {
   if (H === null || A === null) return { predictionsUpdated: 0, fantikiAwarded: 0 };
   const mid = String(matchId).trim(), tg = H + A;
   const { Predictions: p, Users: u, Matches: m } = await batchGetSheets([
-    { sheet: 'Predictions', range: 'A:K' }, { sheet: 'Users', range: 'A:R' }, { sheet: 'Matches', range: 'A:J' },
+    { sheet: 'Predictions', range: 'A:K' }, { sheet: 'Users', range: 'A:W' }, { sheet: 'Matches', range: 'A:J' },
   ]);
   const matchRow = m.find(r => isDataRow(r, 'match_id') && String(r[0]).trim() === mid);
   const mdk = matchRow ? getMatchdayKey(matchRow[4]) : null;
   const lm = getLatestPredictionMap(p);
   const predUpdates = [], userDeltas = new Map(), fantikiDeltas = new Map();
+  
   p.forEach((row, rowIndex) => {
     if (!isDataRow(row, 'prediction_id')) return;
     if (String(row[2] || '').trim() !== mid) return;
@@ -1516,6 +1443,23 @@ async function recalculatePointsForMatch(matchId, hs, as) {
     await awardFantiki(uid, amt, amt > 0 ? 'prediction_award' : 'prediction_correction', mid, '');
     ta += amt;
   }
+
+  // Уведомления о результатах
+  if (matchRow && String(matchRow[5]).trim() === 'finished') {
+    for (const [uid] of userDeltas) {
+      const predRow = p.find(r => isDataRow(r, 'prediction_id') && String(r[1]).trim() === uid && String(r[2]).trim() === mid);
+      if (predRow) {
+        const r = calculatePoints(predRow[3], predRow[4], H, A);
+        const t = { exact: 'ТС', difference: 'разница', draw: 'ничья', outcome: 'исход', miss: 'промах' }[r.type] || '';
+        const pts = r.points;
+        let emoji = pts === 5 ? '🔥' : pts > 0 ? '✅' : '❌';
+        let msg = `${emoji} <b>${matchRow[2]} ${H}:${A} ${matchRow[3]}</b>\nТвой прогноз: ${predRow[3]}:${predRow[4]}. ${t ? `${t}, ` : ''}очки: <b>${pts}</b>.`;
+        if (fantikiDeltas.has(uid) && fantikiDeltas.get(uid) !== 0) msg += `\n🪙 Фантики: <b>${fantikiDeltas.get(uid) > 0 ? '+' : ''}${fantikiDeltas.get(uid)}</b>.`;
+        await notifyUser(uid, 'results', msg);
+      }
+    }
+  }
+
   if (mdk) await checkMatchdayStreakBonus(mdk).catch(console.error);
   await settleDuelsForMatch(mid).catch(console.error);
   
@@ -1633,7 +1577,7 @@ async function updateMatchEventsForFinished() {
 }
 
 async function recalculateAll() {
-  const { Users: u, Predictions: p, Matches: m } = await batchGetSheets([{ sheet: 'Users', range: 'A:R' }, { sheet: 'Predictions', range: 'A:K' }, { sheet: 'Matches', range: 'A:J' }]);
+  const { Users: u, Predictions: p, Matches: m } = await batchGetSheets([{ sheet: 'Users', range: 'A:W' }, { sheet: 'Predictions', range: 'A:K' }, { sheet: 'Matches', range: 'A:J' }]);
   const fin = new Map();
   m.forEach(r => {
     if (!isDataRow(r, 'match_id')) return;
@@ -1720,6 +1664,7 @@ async function getUserPredictionsResponse(userId, query = {}) {
 
 let telegramOffset = 0, conflictCounter = 0;
 const userPredictState = new Map();
+const remindedMatches = new Set();
 
 async function callTelegram(method, params) {
   const url = `${TELEGRAM_API_BASE}/bot${BOT_TOKEN}/${method}`;
@@ -1734,7 +1679,7 @@ function makeMainKeyboard() {
       [{ text: '⚽ Матчи' }, { text: '📊 Таблица' }],
       [{ text: '🎯 Мои' }, { text: '💰 Баланс' }],
       [{ text: '⚔️ Дуэли' }, { text: '👥 Лиги' }],
-      [{ text: '❓ Помощь' }],
+      [{ text: '⚙️ Настройки' }, { text: '❓ Помощь' }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -1748,6 +1693,7 @@ const BTN_TO_CMD = {
   '💰 Баланс': 'balance',
   '⚔️ Дуэли': 'duels',
   '👥 Лиги': 'leagues',
+  '⚙️ Настройки': 'settings',
   '❓ Помощь': 'help',
 };
 
@@ -1768,7 +1714,6 @@ async function setupBotUI() {
         { command: 'my', description: '🎯 Мои прогнозы' },
         { command: 'balance', description: '💰 Баланс фантиков' },
         { command: 'duels', description: '⚔️ Открытые дуэли' },
-        { command: 'rules', description: '📜 Правила начислений' },
         { command: 'settings', description: '⚙️ Настройки уведомлений' },
         { command: 'help', description: '❓ Помощь' },
       ],
@@ -1779,11 +1724,7 @@ async function setupBotUI() {
   if (RENDER_HOST) {
     try {
       await callTelegram('setChatMenuButton', {
-        menu_button: {
-          type: 'web_app',
-          text: 'Открыть КБП',
-          web_app: { url: `https://${RENDER_HOST}/` },
-        },
+        menu_button: { type: 'web_app', text: 'Открыть КБП', web_app: { url: `https://${RENDER_HOST}/` } },
       });
       console.log('✅ Menu Button настроен');
     } catch (e) { console.warn('setChatMenuButton:', e.message); }
@@ -1799,7 +1740,7 @@ function fmtKickoff(utc) {
 async function getUserOrCreate(msg) {
   const from = msg.from;
   const uid = String(from.id);
-  const usersData = await getSheetData('Users', 'A:R');
+  const usersData = await getSheetData('Users', 'A:W');
   const user = usersData.find(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
   return { uid, user, from };
 }
@@ -1833,7 +1774,7 @@ async function cmdStart(msg) {
 /table — таблица дивизиона
 /my — мои прогнозы
 /balance — баланс фантиков
-/rules — правила
+/settings — настройки уведомлений
 /help — помощь
 
 👇 <b>Или открой приложение:</b>`;
@@ -1843,14 +1784,8 @@ async function cmdStart(msg) {
     opts.reply_markup = {
       inline_keyboard: [
         [{ text: '🚀 Открыть КБП', web_app: { url: appUrl } }],
-        [
-          { text: '⚽ Матчи', web_app: { url: `${appUrl}?section=matches` } },
-          { text: '🎯 Мои', web_app: { url: `${appUrl}?section=my` } }
-        ],
-        [
-          { text: '📊 Таблица', web_app: { url: `${appUrl}?section=table` } },
-          { text: '👥 Лиги', web_app: { url: `${appUrl}?section=leagues` } }
-        ],
+        [{ text: '⚽ Матчи', web_app: { url: `${appUrl}?section=matches` } }, { text: '🎯 Мои', web_app: { url: `${appUrl}?section=my` } }],
+        [{ text: '📊 Таблица', web_app: { url: `${appUrl}?section=table` } }, { text: '👥 Лиги', web_app: { url: `${appUrl}?section=leagues` } }],
         [{ text: '🛒 Магазин', web_app: { url: `${appUrl}?section=shop` } }],
       ],
     };
@@ -1880,7 +1815,6 @@ async function cmdHelp(msg) {
 🎖 <b>Уровни</b> — от Новичка до Профи. Чем выше уровень, тем больше % к наградам.
 
 📜 Подробные правила: /rules`;
-
   await sendPlain(chatId, text);
 }
 
@@ -1922,11 +1856,77 @@ async function cmdRules(msg) {
 
 <b>⚔️ Дуэли</b>
 Ставка 10–500 (кратна 5). Нельзя ставить тот же счёт. 1 угадал — забирает банк, 2+ — делят, 0 — возврат всем.`;
-
   await sendPlain(chatId, text);
 }
 
-async function cmdMatches(msg) {
+async function buildMatchesMessage(uid, targetDay, allMatches, userPreds) {
+  const matches = allMatches.filter(r => getMatchdayKey(r[4]) === targetDay).sort((a, b) => new Date(a[4]).getTime() - new Date(b[4]).getTime());
+  if (!matches.length) return { text: '⚽ На этот день матчей нет.', buttons: [] };
+
+  const dayLabel = getDayLabelMsk(targetDay);
+  let text = `⚽ <b>Матчи · ${dayLabel}</b>\n<i>Всего: ${matches.length}</i>\n\n`;
+  
+  const predictedIds = new Set(userPreds.map(x => String(x[2]).trim()));
+  
+  matches.forEach(r => {
+    const mid = String(r[0]).trim();
+    const home = r[2] || '', away = r[3] || '';
+    const status = String(r[5] || '').trim();
+    const kickoff = fmtKickoff(r[4]);
+    const myPred = userPreds.find(x => String(x[2]).trim() === mid);
+    if (status === 'finished') {
+      text += `✅ <b>${home} ${r[6] || '-'}:${r[7] || '-'} ${away}</b>${myPred ? ` · твой ${myPred[3]}:${myPred[4]}` : ''}\n`;
+    } else if (status === 'live') {
+      text += `🔴 <b>${home} — ${away}</b> · идёт${myPred ? ` · твой ${myPred[3]}:${myPred[4]}` : ''}\n`;
+    } else if (status === 'scheduled') {
+      text += `⏰ <b>${home} — ${away}</b> · ${kickoff}${myPred ? ` · ✓ ${myPred[3]}:${myPred[4]}` : ''}\n`;
+    } else {
+      text += `⏸ <b>${home} — ${away}</b> · ${status}\n`;
+    }
+  });
+
+  const buttons = [];
+  const scheduledAll = matches.filter(r => String(r[5] || '').trim() === 'scheduled');
+  const scheduledNew = scheduledAll.filter(m => !predictedIds.has(String(m[0]).trim()));
+  
+  const toShow = scheduledNew.slice(0, 5);
+  toShow.forEach(m => {
+    buttons.push([{ text: `⚽ ${m[2]} — ${m[3]}`, callback_data: `pred_${m[0]}` }]);
+  });
+  
+  if (scheduledNew.length > 5) {
+    buttons.push([{ text: `➕ Ещё ${scheduledNew.length - 5} матчей ждут прогноза (открой приложение)`, web_app: { url: `${RENDER_HOST ? 'https://'+RENDER_HOST+'/' : ''}?section=matches` } }]);
+  }
+
+  const prevDay = getMatchdayKey(new Date(`${targetDay}T12:00:00+03:00`).getTime() - 86400000);
+  const nextDay = getMatchdayKey(new Date(`${targetDay}T12:00:00+03:00`).getTime() + 86400000);
+  const hasPrev = allMatches.some(r => getMatchdayKey(r[4]) === prevDay);
+  const hasNext = allMatches.some(r => getMatchdayKey(r[4]) === nextDay);
+  if (hasPrev || hasNext) {
+    const nav = [];
+    if (hasPrev) nav.push({ text: `◀ ${getDayLabelMsk(prevDay)}`, callback_data: `matches_${prevDay}` });
+    if (hasNext) nav.push({ text: `${getDayLabelMsk(nextDay)} ▶`, callback_data: `matches_${nextDay}` });
+    if (nav.length) buttons.push(nav);
+  }
+
+  const appUrl = RENDER_HOST ? `https://${RENDER_HOST}/` : '';
+  if (appUrl) buttons.push([{ text: '📱 Открыть приложение', web_app: { url: `${appUrl}?section=matches` } }]);
+
+  let footer;
+  if (scheduledNew.length) {
+    footer = '\n\n<b>Выбери матч → введи счёт</b> (например: <code>2:1</code>)';
+  } else if (scheduledAll.length > 0) {
+    footer = '\n\n<i>✅ На все матчи дня прогнозы сделаны. Хочешь изменить — открой приложение.</i>';
+  } else if (matches.some(m => ['live', 'finished'].includes(String(m[5] || '').trim()))) {
+    footer = '\n\n<i>Матчи уже начались или завершились. Прогнозы больше не принимаются.</i>';
+  } else {
+    footer = '';
+  }
+
+  return { text: text.trim() + footer, buttons };
+}
+
+async function cmdMatches(msg, dayOverride = null) {
   const chatId = msg.chat.id;
   const { uid } = await getUserOrCreate(msg);
 
@@ -1934,59 +1934,41 @@ async function cmdMatches(msg) {
     { sheet: 'Matches', range: 'A:J' }, { sheet: 'Predictions', range: 'A:K' },
   ]);
 
-  const todayKey = new Date().toISOString().slice(0, 10);
-  const dayMatches = m.filter(r => isDataRow(r, 'match_id') && getMatchdayKey(r[4]) === todayKey);
+  const now = Date.now();
+  const allMatches = m.filter(r => isDataRow(r, 'match_id'));
 
-  let targetDay = todayKey;
-  let matches = dayMatches;
-  if (!matches.length) {
-    const future = m.filter(r => isDataRow(r, 'match_id') && String(r[5] || '').trim() === 'scheduled')
-      .sort((a, b) => new Date(a[4]).getTime() - new Date(b[4]).getTime());
-    if (future.length) {
-      targetDay = getMatchdayKey(future[0][4]);
-      matches = m.filter(r => isDataRow(r, 'match_id') && getMatchdayKey(r[4]) === targetDay);
+  let targetDay = dayOverride;
+  if (!targetDay) {
+    const todayKey = getMatchdayKey(new Date().toISOString());
+    const todayHasActive = allMatches.some(r => getMatchdayKey(r[4]) === todayKey && ['scheduled', 'live'].includes(String(r[5] || '').trim()));
+    if (todayHasActive) {
+      targetDay = todayKey;
+    } else {
+      const future = allMatches
+        .filter(r => String(r[5] || '').trim() === 'scheduled' && new Date(r[4]).getTime() > now)
+        .sort((a, b) => new Date(a[4]).getTime() - new Date(b[4]).getTime());
+      if (future.length) {
+        targetDay = getMatchdayKey(future[0][4]);
+      } else {
+        const last = allMatches
+          .filter(r => ['finished', 'live'].includes(String(r[5] || '').trim()))
+          .sort((a, b) => new Date(b[4]).getTime() - new Date(a[4]).getTime());
+        if (last.length) targetDay = getMatchdayKey(last[0][4]);
+      }
     }
   }
 
-  if (!matches.length) {
-    await sendPlain(chatId, '⚽ Матчей в ближайшее время нет. Загляни позже!');
+  if (!targetDay) {
+    await sendPlain(chatId, '⚽ Матчей нет. Загляни позже!');
     return;
   }
 
   const userPreds = getLatestPredictionsForUser(p, uid);
-  const dayLabel = new Date(`${targetDay}T00:00:00Z`).toLocaleDateString('ru-RU', { day: '2-digit', month: 'long' });
-
-  let text = `⚽ <b>Матчи — ${dayLabel}</b>\n\n`;
-  matches.forEach(r => {
-    const mid = String(r[0]).trim();
-    const home = r[2] || '', away = r[3] || '';
-    const status = String(r[5] || '').trim();
-    const kickoff = fmtKickoff(r[4]);
-    const myPred = userPreds.find(x => String(x[2]).trim() === mid);
-    let line = '';
-    if (status === 'finished') {
-      line = `✅ <b>${home} — ${away}</b>\n   Счёт: ${r[6] || '-'}:${r[7] || '-'}${myPred ? ` · твой: ${myPred[3]}:${myPred[4]}` : ''}`;
-    } else if (status === 'live') {
-      line = `🔴 <b>${home} — ${away}</b> · идёт\n   Твой прогноз: ${myPred ? `${myPred[3]}:${myPred[4]}` : '—'}`;
-    } else if (status === 'scheduled') {
-      line = `⏰ <b>${home} — ${away}</b> · ${kickoff}\n   ${myPred ? `Твой: ${myPred[3]}:${myPred[4]} ✓` : 'Прогноза нет ✗'}`;
-    } else {
-      line = `⏸ <b>${home} — ${away}</b> · ${status}`;
-    }
-    text += line + '\n\n';
-  });
-
-  const buttons = [];
-  const scheduledMatches = matches.filter(r => String(r[5] || '').trim() === 'scheduled');
-  scheduledMatches.slice(0, 5).forEach(m => {
-    buttons.push([{ text: `⚽ ${m[2]} — ${m[3]}`, callback_data: `pred_${m[0]}` }]);
-  });
-  
-  const appUrl = RENDER_HOST ? `https://${RENDER_HOST}/` : '';
-  if (appUrl && buttons.length < 5) buttons.push([{ text: '🎯 Открыть все', web_app: { url: `${appUrl}?section=matches` } }]);
+  const { text, buttons } = await buildMatchesMessage(uid, targetDay, allMatches, userPreds);
 
   const opts = buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {};
-  await sendPlain(chatId, text.trim() + '\n\n<b>Нажми на матч, чтобы сделать прогноз:</b>', opts);
+  const sent = await callTelegram('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', ...opts });
+  return sent.result.message_id;
 }
 
 async function cmdTable(msg) {
@@ -2130,9 +2112,9 @@ async function cmdDuels(msg) {
 
 async function cmdSettings(msg) {
   const chatId = msg.chat.id;
-  const text = `⚙️ <b>Настройки уведомлений</b>\n\nУправляй уведомлениями в приложении — открой «Мои прогнозы» → «⚙️ Настройки».\n\nСкоро добавим: напоминания о матчах, результаты, призовые, уровни.`;
   const appUrl = RENDER_HOST ? `https://${RENDER_HOST}/` : '';
   const opts = appUrl ? { reply_markup: { inline_keyboard: [[{ text: '⚙️ Открыть настройки', web_app: { url: `${appUrl}?section=settings` } }]] } } : {};
+  const text = `⚙️ <b>Настройки уведомлений</b>\n\nУправляй уведомлениями в приложении:\n• 🔔 Напоминания о матчах\n• 🏆 Результаты матчей\n• 🥇 Призовые и квесты\n• ⚔️ Вступления в дуэли\n\nНажми кнопку ниже, чтобы изменить настройки.`;
   await sendPlain(chatId, text, opts);
 }
 
@@ -2171,6 +2153,16 @@ async function processCallbackQuery(cb) {
   const userId = String(cb.from.id);
   const data = cb.data || '';
 
+  if (data.startsWith('matches_')) {
+    const dayKey = data.replace('matches_', '');
+    await callTelegram('answerCallbackQuery', { callback_query_id: cb.id });
+    // Удаляем старое сообщение с кнопками
+    await callTelegram('deleteMessage', { chat_id: chatId, message_id: cb.message.message_id }).catch(() => {});
+    const fakeMsg = { chat: { id: chatId }, from: cb.from, text: '/matches' };
+    await cmdMatches(fakeMsg, dayKey);
+    return;
+  }
+
   if (data.startsWith('pred_')) {
     const matchId = data.replace('pred_', '');
     const matchesData = await getSheetData('Matches', 'A:J');
@@ -2181,9 +2173,8 @@ async function processCallbackQuery(cb) {
       return;
     }
 
-    userPredictState.set(userId, { matchId, home: match[2], away: match[3] });
-    await callTelegram('answerCallbackQuery', { callback_query_id: cb.id });
-    await sendPlain(chatId, `⚽ <b>${match[2]} — ${match[3]}</b>\n\nНапиши счёт одним сообщением (например: <code>2:1</code>)`);
+    userPredictState.set(userId, { matchId, home: match[2], away: match[3], messageId: cb.message.message_id, day: getMatchdayKey(match[4]) });
+    await callTelegram('answerCallbackQuery', { callback_query_id: cb.id, text: `⚽ ${match[2]} — ${match[3]}\nНапиши счёт в чат`, show_alert: false });
   }
 }
 
@@ -2192,28 +2183,23 @@ async function processTelegramMessage(msg) {
   if (!from) return;
   const uid = String(from.id);
 
-  // Обработка успешной оплаты Stars
   if (msg.successful_payment) {
     try {
       const payload = JSON.parse(msg.successful_payment.invoice_payload);
       const { uid: targetUid, fantiki } = payload;
       const chargeId = msg.successful_payment.telegram_payment_charge_id;
-      
       const r = await awardFantiki(targetUid, fantiki, 'stars_purchase', chargeId, `stars|${chargeId}`);
       if (r.success) {
         await sendPlain(chatId, `✅ <b>Успешно!</b>\nНачислено <b>${fantiki}</b> 🪙 фантиков.\n\nСпасибо за поддержку проекта!`);
       } else {
         await sendPlain(chatId, `⚠️ Произошла ошибка при начислении. Напишите в поддержку. ID: ${chargeId}`);
       }
-    } catch (e) {
-      console.error('Payment error:', e);
-    }
+    } catch (e) { console.error('Payment error:', e); }
     return;
   }
 
   if (!text) return;
 
-  // Проверяем, ждем ли мы от юзера ввод счета
   if (userPredictState.has(uid)) {
     const state = userPredictState.get(uid);
     const m = text.match(/^(\d{1,2})\s*[:\-]\s*(\d{1,2})$/);
@@ -2233,6 +2219,26 @@ async function processTelegramMessage(msg) {
       
       await sendPlain(chatId, `✅ <b>Прогноз сохранен!</b>\n${state.home} <b>${pH}:${pA}</b> ${state.away}`);
       userPredictState.delete(uid);
+
+      // Редактируем сообщение с кнопками (авто-обновление)
+      try {
+        const { Matches: allM, Predictions: allP } = await batchGetSheets([{ sheet: 'Matches', range: 'A:J' }, { sheet: 'Predictions', range: 'A:K' }]);
+        const allMatches = allM.filter(r => isDataRow(r, 'match_id'));
+        const newUserPreds = getLatestPredictionsForUser(allP, uid);
+        const { text: newText, buttons } = await buildMatchesMessage(uid, state.day, allMatches, newUserPreds);
+        
+        const opts = buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {};
+        await callTelegram('editMessageText', {
+          chat_id: chatId,
+          message_id: state.messageId,
+          text: newText,
+          parse_mode: 'HTML',
+          ...opts
+        });
+      } catch (editErr) {
+        console.error('Edit message error:', editErr.message);
+      }
+      
       return;
     } else if (text === 'Отмена' || text === '/cancel') {
       userPredictState.delete(uid);
@@ -2259,7 +2265,7 @@ async function processTelegramMessage(msg) {
   }
 
   const un = from.username || '';
-  const usersData = await getSheetData('Users', 'A:R');
+  const usersData = await getSheetData('Users', 'A:W');
   
   const refMatch = text.match(/^\/start\s+ref_(\d+)/);
   const refId = refMatch ? refMatch[1] : '';
@@ -2268,7 +2274,7 @@ async function processTelegramMessage(msg) {
   if (userIndex === -1) {
     let dn = from.first_name || un || 'User';
     if (from.last_name && from.first_name) dn = `${from.first_name} ${from.last_name}`;
-    await appendRows('Users', [[uid, un, dn, new Date().toISOString(), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, refId, 'FALSE']]);
+    await appendRows('Users', [[uid, un, dn, new Date().toISOString(), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, refId, 'FALSE', 'TRUE', 'TRUE', 'TRUE', 'TRUE', 'FALSE']]);
   } else if (refId && refId !== uid) {
     const p = padRow(usersData[userIndex], EXPECTED_COLUMNS.Users);
     if (!p[16]) {
@@ -2357,20 +2363,61 @@ async function startBotPolling() {
 app.post(WEBHOOK_PATH, (req, res) => {
   if (req.headers['x-telegram-bot-api-secret-token'] !== WEBHOOK_SECRET) return res.status(403).json({ error: 'Forbidden' });
   res.status(200).json({ ok: true });
-  
   if (req.body?.pre_checkout_query) {
     callTelegram('answerPreCheckoutQuery', {
       pre_checkout_query_id: req.body.pre_checkout_query.id,
       ok: true
     }).catch(console.error);
   }
-  
   if (req.body?.message) processTelegramMessage(req.body.message).catch(e => console.error('Webhook:', e.message));
   if (req.body?.callback_query) processCallbackQuery(req.body.callback_query).catch(e => console.error('Callback:', e.message));
 });
 
-// ========== API ==========
+// ========== REMINDER CRON ==========
+setInterval(async () => {
+  try {
+    const { Matches: m, Predictions: p, Users: u } = await batchGetSheets([
+      { sheet: 'Matches', range: 'A:J' }, { sheet: 'Predictions', range: 'A:K' }, { sheet: 'Users', range: 'A:W' }
+    ]);
+    const now = Date.now();
+    const upcoming = m.filter(r => 
+      isDataRow(r, 'match_id') && 
+      String(r[5] || '').trim() === 'scheduled' && 
+      new Date(r[4]).getTime() - now > 55 * 60 * 1000 && 
+      new Date(r[4]).getTime() - now < 65 * 60 * 1000
+    );
+    if (!upcoming.length) return;
 
+    const lm = getLatestPredictionMap(p);
+    const usersWhoPredict = new Set([...lm.values()].map(x => String(p[x.idx]?.[1] || '').trim()));
+
+    for (const match of upcoming) {
+      const mid = String(match[0]).trim();
+      if (remindedMatches.has(mid)) continue;
+      
+      const text = `⏰ <b>Напоминание!</b>\nМатч <b>${match[2]} — ${match[3]}</b> начнётся через час.\nУспей сделать прогноз!`;
+      const appUrl = RENDER_HOST ? `https://${RENDER_HOST}/` : '';
+      const opts = appUrl ? { reply_markup: { inline_keyboard: [[{ text: '🎯 Сделать прогноз', web_app: { url: `${appUrl}?section=matches` } }]] } } : {};
+
+      for (const row of u) {
+        if (!isDataRow(row, 'user_id')) continue;
+        const uid = String(row[0]).trim();
+        const pRow = padRow(row, EXPECTED_COLUMNS.Users);
+        
+        // Пропускаем тех, кто уже сделал прогноз или отключил напоминания
+        if (usersWhoPredict.has(`${uid}|${mid}`)) continue;
+        if (String(pRow[18]).toUpperCase() !== 'TRUE') continue;
+        if (String(pRow[22]).toUpperCase() === 'TRUE') continue; // bot_blocked
+
+        await callTelegram('sendMessage', { chat_id: uid, text, parse_mode: 'HTML', ...opts }).catch(() => {});
+        await sleep(50); // anti-flood
+      }
+      remindedMatches.add(mid);
+    }
+  } catch (e) { console.error('Reminder cron error:', e.message); }
+}, 5 * 60 * 1000);
+
+// ========== API ==========
 app.get('/api/levels', (req, res) => res.json(LEVELS_DATA));
 
 app.get('/api/fantiki/today/:userId', asyncHandler(async (req, res) => {
@@ -2400,7 +2447,6 @@ app.get('/api/private-leagues/my/:userId', asyncHandler(async (req, res) => {
   if (!uid) return res.status(400).json({ error: 'userId required' });
   res.json(await getPrivateLeaguesForUser(uid));
 }));
-
 app.post('/api/private-leagues/create', asyncHandler(async (req, res) => {
   const uid = extractUserId(req);
   if (!uid) return res.status(401).json({ error: 'Unauthorized' });
@@ -2408,7 +2454,6 @@ app.post('/api/private-leagues/create', asyncHandler(async (req, res) => {
   if (!r.success) return res.status(400).json(r);
   res.json(r);
 }));
-
 app.post('/api/private-leagues/join', asyncHandler(async (req, res) => {
   const uid = extractUserId(req);
   if (!uid) return res.status(401).json({ error: 'Unauthorized' });
@@ -2416,7 +2461,6 @@ app.post('/api/private-leagues/join', asyncHandler(async (req, res) => {
   if (!r.success) return res.status(400).json(r);
   res.json(r);
 }));
-
 app.get('/api/private-leagues/:leagueId', asyncHandler(async (req, res) => {
   const uid = extractUserId(req);
   if (!uid) return res.status(401).json({ error: 'Unauthorized' });
@@ -2424,7 +2468,6 @@ app.get('/api/private-leagues/:leagueId', asyncHandler(async (req, res) => {
   if (!r.success) return res.status(r.code || 400).json({ error: r.error });
   res.json(r);
 }));
-
 app.post('/api/private-leagues/:leagueId/leave', asyncHandler(async (req, res) => {
   const uid = extractUserId(req);
   if (!uid) return res.status(401).json({ error: 'Unauthorized' });
@@ -2432,7 +2475,6 @@ app.post('/api/private-leagues/:leagueId/leave', asyncHandler(async (req, res) =
   if (!r.success) return res.status(400).json(r);
   res.json(r);
 }));
-
 app.delete('/api/private-leagues/:leagueId', asyncHandler(async (req, res) => {
   const uid = extractUserId(req);
   if (!uid) return res.status(401).json({ error: 'Unauthorized' });
@@ -2445,106 +2487,99 @@ app.delete('/api/private-leagues/:leagueId', asyncHandler(async (req, res) => {
 app.post('/api/stars/invoice', asyncHandler(async (req, res) => {
   const uid = extractUserId(req);
   if (!uid) return res.status(401).json({ error: 'Unauthorized' });
-  
   const packages = {
     'p1': { stars: 50, fantiki: 5000, label: '5000 фантиков' },
     'p2': { stars: 100, fantiki: 11000, label: '11000 фантиков' },
     'p3': { stars: 250, fantiki: 30000, label: '30000 фантиков' }
   };
-  
   const pkg = packages[req.body.packageId];
   if (!pkg) return res.status(400).json({ error: 'Invalid package' });
-
   const payload = JSON.stringify({ uid, fantiki: pkg.fantiki });
-  
   try {
     const invoice = await callTelegram('createInvoiceLink', {
       title: 'Покупка фантиков',
       description: `Начисление ${pkg.label} в игру Лига Чемпионов КБП`,
-      payload: payload,
-      provider_token: '', // Для Stars всегда пусто
-      currency: 'XTR',
+      payload, provider_token: '', currency: 'XTR',
       prices: [{ label: pkg.label, amount: pkg.stars }]
     });
     res.json({ invoiceLink: invoice.result });
-  } catch (e) {
-    res.status(500).json({ error: 'Ошибка создания счета: ' + e.message });
-  }
+  } catch (e) { res.status(500).json({ error: 'Ошибка создания счета: ' + e.message }); }
+}));
+
+// ========== NOTIFICATION SETTINGS ==========
+app.get('/api/notification-settings/:userId', asyncHandler(async (req, res) => {
+  const uid = String(req.params.userId || '').trim();
+  if (!uid) return res.status(400).json({ error: 'userId required' });
+  const usersData = await getSheetData('Users', 'A:W');
+  const row = usersData.find(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
+  if (!row) return res.status(404).json({ error: 'User not found' });
+  const p = padRow(row, EXPECTED_COLUMNS.Users);
+  res.json({
+    reminder: String(p[18]).toUpperCase() === 'TRUE',
+    results: String(p[19]).toUpperCase() === 'TRUE',
+    prizes: String(p[20]).toUpperCase() === 'TRUE',
+    duels: String(p[21]).toUpperCase() === 'TRUE',
+  });
+}));
+app.post('/api/notification-settings', asyncHandler(async (req, res) => {
+  const uid = extractUserId(req);
+  if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+  const { reminder, results, prizes, duels } = req.body;
+  const usersData = await getSheetData('Users', 'A:W');
+  const idx = usersData.findIndex(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
+  if (idx === -1) return res.status(404).json({ error: 'User not found' });
+  const p = padRow(usersData[idx], EXPECTED_COLUMNS.Users);
+  p[18] = reminder ? 'TRUE' : 'FALSE';
+  p[19] = results ? 'TRUE' : 'FALSE';
+  p[20] = prizes ? 'TRUE' : 'FALSE';
+  p[21] = duels ? 'TRUE' : 'FALSE';
+  await writeRow('Users', idx, p);
+  res.json({ success: true });
 }));
 
 // ========== SHOP ==========
 app.get('/api/shop/items/:userId', asyncHandler(async (req, res) => {
   const uid = String(req.params.userId || '').trim();
-  const { ShopItems: items, UserInventory: inv } = await batchGetSheets([
-    { sheet: 'ShopItems', range: 'A:G' }, { sheet: 'UserInventory', range: 'A:D' }
-  ]);
-  
+  const { ShopItems: items, UserInventory: inv } = await batchGetSheets([{ sheet: 'ShopItems', range: 'A:G' }, { sheet: 'UserInventory', range: 'A:D' }]);
   const userInv = inv.filter(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
-  
   const result = items.filter(r => isDataRow(r, 'item_id')).map(r => {
     const itemId = String(r[0]).trim();
     const owned = userInv.find(x => String(x[1]).trim() === itemId);
-    return {
-      id: itemId,
-      name: r[1] || '',
-      type: r[2] || '',
-      price: toNum(r[3], 0),
-      icon: r[4] || '',
-      desc: r[5] || '',
-      imageUrl: r[6] || '',
-      owned: !!owned,
-      equipped: owned ? String(owned[2]).trim().toUpperCase() === 'TRUE' : false
-    };
+    return { id: itemId, name: r[1] || '', type: r[2] || '', price: toNum(r[3], 0), icon: r[4] || '', desc: r[5] || '', imageUrl: r[6] || '', owned: !!owned, equipped: owned ? String(owned[2]).trim().toUpperCase() === 'TRUE' : false };
   });
   res.json(result);
 }));
-
 app.post('/api/shop/buy', asyncHandler(async (req, res) => {
   const uid = extractUserId(req);
   const { itemId } = req.body;
   if (!uid || !itemId) return res.status(400).json({ error: 'Missing params' });
-  
-  const { ShopItems: items, UserInventory: inv, Users: users } = await batchGetSheets([
-    { sheet: 'ShopItems', range: 'A:G' }, { sheet: 'UserInventory', range: 'A:D' }, { sheet: 'Users', range: 'A:R' }
-  ]);
-  
+  const { ShopItems: items, UserInventory: inv, Users: users } = await batchGetSheets([{ sheet: 'ShopItems', range: 'A:G' }, { sheet: 'UserInventory', range: 'A:D' }, { sheet: 'Users', range: 'A:W' }]);
   const item = items.find(r => isDataRow(r, 'item_id') && String(r[0]).trim() === itemId);
   if (!item) return res.status(404).json({ error: 'Item not found' });
   const price = toNum(item[3], 0);
-  
   const alreadyOwned = inv.some(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid && String(r[1]).trim() === itemId);
   if (alreadyOwned) return res.status(400).json({ error: 'Уже куплено' });
-  
   const uRow = users.find(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
   const bal = toNum(padRow(uRow, EXPECTED_COLUMNS.Users)[12], 0);
   if (bal < price) return res.status(400).json({ error: 'Недостаточно фантиков' });
-  
   await awardFantiki(uid, -price, 'shop_buy', itemId, '');
   await appendRows('UserInventory', [[uid, itemId, 'FALSE', new Date().toISOString()]]);
-  
   res.json({ success: true, newBalance: bal - price });
 }));
-
 app.post('/api/shop/equip', asyncHandler(async (req, res) => {
   const uid = extractUserId(req);
   const { itemId } = req.body;
   if (!uid || !itemId) return res.status(400).json({ error: 'Missing params' });
-  
-  const { ShopItems: items, UserInventory: inv } = await batchGetSheets([
-    { sheet: 'ShopItems', range: 'A:G' }, { sheet: 'UserInventory', range: 'A:D' }
-  ]);
-  
+  const { ShopItems: items, UserInventory: inv } = await batchGetSheets([{ sheet: 'ShopItems', range: 'A:G' }, { sheet: 'UserInventory', range: 'A:D' }]);
   const item = items.find(r => isDataRow(r, 'item_id') && String(r[0]).trim() === itemId);
   if (!item) return res.status(404).json({ error: 'Item not found' });
   const type = String(item[2]).trim();
-  
   const updates = [];
   inv.forEach((r, idx) => {
     if (!isDataRow(r, 'user_id') || String(r[0]).trim() !== uid) return;
     const thisItemId = String(r[1]).trim();
     const thisItem = items.find(x => String(x[0]).trim() === thisItemId);
     if (!thisItem || String(thisItem[2]).trim() !== type) return;
-    
     const shouldEquip = thisItemId === itemId;
     const isCurrently = String(r[2]).trim().toUpperCase() === 'TRUE';
     if (shouldEquip !== isCurrently) {
@@ -2553,7 +2588,6 @@ app.post('/api/shop/equip', asyncHandler(async (req, res) => {
       updates.push({ rowIndex: idx, values: u });
     }
   });
-  
   if (updates.length) await batchWriteRows('UserInventory', updates);
   res.json({ success: true });
 }));
@@ -2561,14 +2595,10 @@ app.post('/api/shop/equip', asyncHandler(async (req, res) => {
 app.get('/api/user-stats/:userId', asyncHandler(async (req, res) => {
   const uid = String(req.params.userId || '').trim();
   if (!uid) return res.status(400).json({ error: 'userId required' });
-
-  const { Matches: m, Predictions: p } = await batchGetSheets([
-    { sheet: 'Matches', range: 'A:J' }, { sheet: 'Predictions', range: 'A:K' }
-  ]);
+  const { Matches: m, Predictions: p } = await batchGetSheets([{ sheet: 'Matches', range: 'A:J' }, { sheet: 'Predictions', range: 'A:K' }]);
   const mMap = new Map(); m.forEach(r => { if (isDataRow(r, 'match_id')) mMap.set(String(r[0]).trim(), r); });
   const lm = getLatestPredictionMap(p);
   const teamStats = new Map();
-
   for (const it of lm.values()) {
     const row = p[it.idx];
     if (!row || String(row[1] || '').trim() !== uid) continue;
@@ -2577,10 +2607,8 @@ app.get('/api/user-stats/:userId', asyncHandler(async (req, res) => {
     if (!match || String(match[5] || '').trim() !== 'finished') continue;
     const H = toScore(match[6]), A = toScore(match[7]);
     if (H === null || A === null) continue;
-    
     const result = calculatePoints(row[3], row[4], H, A);
     const success = result.points > 0;
-    
     const teams = [match[2], match[3]].filter(Boolean);
     for (const t of teams) {
       if (!teamStats.has(t)) teamStats.set(t, { total: 0, success: 0 });
@@ -2589,22 +2617,16 @@ app.get('/api/user-stats/:userId', asyncHandler(async (req, res) => {
       if (success) s.success++;
     }
   }
-
   let favTeam = null, worstTeam = null;
   let maxRate = -1, minRate = 2;
-
   for (const [team, s] of teamStats) {
     if (s.total < 3) continue;
     const rate = s.success / s.total;
     if (rate > maxRate) { maxRate = rate; favTeam = { name: team, rate, total: s.total, success: s.success }; }
     if (rate < minRate) { minRate = rate; worstTeam = { name: team, rate, total: s.total, success: s.success }; }
   }
-
-  const { UserInventory: inv, ShopItems: items } = await batchGetSheets([
-    { sheet: 'UserInventory', range: 'A:D' }, { sheet: 'ShopItems', range: 'A:G' }
-  ]);
+  const { UserInventory: inv, ShopItems: items } = await batchGetSheets([{ sheet: 'UserInventory', range: 'A:D' }, { sheet: 'ShopItems', range: 'A:G' }]);
   let equippedAvatar = null, equippedAvatarUrl = null, equippedStatus = null;
-  
   inv.forEach(r => {
     if (isDataRow(r, 'user_id') && String(r[0]).trim() === uid && String(r[2]).trim().toUpperCase() === 'TRUE') {
       const item = items.find(x => isDataRow(x, 'item_id') && String(x[0]).trim() === String(r[1]).trim());
@@ -2614,7 +2636,6 @@ app.get('/api/user-stats/:userId', asyncHandler(async (req, res) => {
       }
     }
   });
-
   res.json({ favTeam, worstTeam, equippedAvatar, equippedAvatarUrl, equippedStatus });
 }));
 
@@ -2622,16 +2643,10 @@ app.get('/api/h2h/:u1/:u2', asyncHandler(async (req, res) => {
   const u1 = String(req.params.u1 || '').trim();
   const u2 = String(req.params.u2 || '').trim();
   if (!u1 || !u2) return res.status(400).json({ error: 'Both userIds required' });
-
-  const { Matches: m, Predictions: p, Duels: d, DuelBets: b } = await batchGetSheets([
-    { sheet: 'Matches', range: 'A:J' }, { sheet: 'Predictions', range: 'A:K' },
-    { sheet: 'Duels', range: 'A:I' }, { sheet: 'DuelBets', range: 'A:G' }
-  ]);
-
+  const { Matches: m, Predictions: p, Duels: d, DuelBets: b } = await batchGetSheets([{ sheet: 'Matches', range: 'A:J' }, { sheet: 'Predictions', range: 'A:K' }, { sheet: 'Duels', range: 'A:I' }, { sheet: 'DuelBets', range: 'A:G' }]);
   const mMap = new Map(); m.forEach(r => { if (isDataRow(r, 'match_id')) mMap.set(String(r[0]).trim(), r); });
   const lm = getLatestPredictionMap(p);
   const preds1 = new Map(), preds2 = new Map();
-
   for (const it of lm.values()) {
     const row = p[it.idx];
     if (!row) continue;
@@ -2640,29 +2655,23 @@ app.get('/api/h2h/:u1/:u2', asyncHandler(async (req, res) => {
     if (uid === u1) preds1.set(mid, row);
     if (uid === u2) preds2.set(mid, row);
   }
-
   let commonMatches = 0, u1Points = 0, u2Points = 0, u1Exact = 0, u2Exact = 0;
-
   for (const [mid, row1] of preds1) {
     const row2 = preds2.get(mid);
     if (!row2) continue;
     const match = mMap.get(mid);
     if (!match || String(match[5] || '').trim() !== 'finished') continue;
-    
     commonMatches++;
     const H = toScore(match[6]), A = toScore(match[7]);
     const r1 = calculatePoints(row1[3], row1[4], H, A);
     const r2 = calculatePoints(row2[3], row2[4], H, A);
-    u1Points += r1.points;
-    u2Points += r2.points;
+    u1Points += r1.points; u2Points += r2.points;
     if (r1.type === 'exact') u1Exact++;
     if (r2.type === 'exact') u2Exact++;
   }
-
   let commonDuels = 0, u1DuelWins = 0, u2DuelWins = 0;
   const duelsMap = new Map(); d.forEach(r => { if (isDataRow(r, 'duel_id')) duelsMap.set(String(r[0]).trim(), r); });
   const userDuels = new Map();
-  
   b.forEach(r => {
     if (!isDataRow(r, 'bet_id')) return;
     const did = String(r[1] || '').trim();
@@ -2671,7 +2680,6 @@ app.get('/api/h2h/:u1/:u2', asyncHandler(async (req, res) => {
     if (uid === u1) userDuels.get(did).u1 = true;
     if (uid === u2) userDuels.get(did).u2 = true;
   });
-
   for (const [did, involved] of userDuels) {
     if (!involved.u1 || !involved.u2) continue;
     const duel = duelsMap.get(did);
@@ -2681,37 +2689,28 @@ app.get('/api/h2h/:u1/:u2', asyncHandler(async (req, res) => {
     if (winners.includes(u1)) u1DuelWins++;
     if (winners.includes(u2)) u2DuelWins++;
   }
-
-  res.json({
-    matches: { count: commonMatches, u1Points, u2Points, u1Exact, u2Exact },
-    duels: { count: commonDuels, u1Wins: u1DuelWins, u2Wins: u2DuelWins }
-  });
+  res.json({ matches: { count: commonMatches, u1Points, u2Points, u1Exact, u2Exact }, duels: { count: commonDuels, u1Wins: u1DuelWins, u2Wins: u2DuelWins } });
 }));
 
 app.get('/api/referral/info/:userId', asyncHandler(async (req, res) => {
   const userId = String(req.params.userId || '').trim();
   if (!userId) return res.status(400).json({ error: 'userId required' });
-  
-  const usersData = await getSheetData('Users', 'A:R');
+  const usersData = await getSheetData('Users', 'A:W');
   const refs = usersData.filter(r => isDataRow(r, 'user_id') && String(r[16] || '').trim() === userId);
   const total = refs.length;
   const completed = refs.filter(r => String(r[17] || '').trim().toUpperCase() === 'TRUE').length;
-  
   const link = `https://t.me/${BOT_USERNAME}?start=ref_${userId}`;
   const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(link)}&color=3b82f6&bgcolor=1e293b`;
-  
   res.json({ link, qrUrl, total, completed });
 }));
 
 app.get('/api/referral/leaderboard', asyncHandler(async (req, res) => {
-  const usersData = await getSheetData('Users', 'A:R');
+  const usersData = await getSheetData('Users', 'A:W');
   const counts = new Map();
   usersData.forEach(r => {
     if (!isDataRow(r, 'user_id')) return;
     const by = String(r[16] || '').trim();
-    if (by && String(r[17] || '').trim().toUpperCase() === 'TRUE') {
-      counts.set(by, (counts.get(by) || 0) + 1);
-    }
+    if (by && String(r[17] || '').trim().toUpperCase() === 'TRUE') counts.set(by, (counts.get(by) || 0) + 1);
   });
   const names = new Map();
   usersData.forEach(r => { if (isDataRow(r, 'user_id')) names.set(String(r[0]).trim(), r[2] || r[1] || r[0]); });
@@ -2742,9 +2741,7 @@ app.post('/api/duels/cancel/:duelId', asyncHandler(async (req, res) => {
   if (!r.success) return res.status(400).json(r);
   res.json(r);
 }));
-app.get('/api/duels/open', asyncHandler(async (req, res) => {
-  res.json(await listOpenDuels());
-}));
+app.get('/api/duels/open', asyncHandler(async (req, res) => { res.json(await listOpenDuels()); }));
 app.get('/api/duels/my/:userId', asyncHandler(async (req, res) => {
   const uid = String(req.params.userId || '').trim();
   if (!uid) return res.status(400).json({ error: 'userId required' });
@@ -2757,10 +2754,7 @@ app.get('/api/duels/:duelId', asyncHandler(async (req, res) => {
   if (!found) return res.status(404).json({ error: 'Not found' });
   res.json(found);
 }));
-app.post('/api/admin/settle-duels', requireAdmin, asyncHandler(async (req, res) => {
-  const r = await settleAllPendingDuels();
-  res.json({ success: true, ...r });
-}));
+app.post('/api/admin/settle-duels', requireAdmin, asyncHandler(async (req, res) => { const r = await settleAllPendingDuels(); res.json({ success: true, ...r }); }));
 
 app.get('/api/fantiki/balance/:userId', asyncHandler(async (req, res) => {
   const info = await getBalance(req.params.userId);
@@ -2827,44 +2821,25 @@ app.post('/api/admin/finalize-all', requireAdmin, asyncHandler(async (req, res) 
     heavyJobRunning = true;
     try {
       const cut = days ? Date.now() - days * 86400000 : 0;
-      const lbl = days ? `за ${days} дн.` : 'за всё время';
-      console.log(`🔄 [finalize-all] SCOPE: ${lbl}`);
       const md = await getSheetData('Matches', 'A:J');
-      const fin = md.filter(r => {
-        if (!isDataRow(r, 'match_id')) return false;
-        if (String(r[5] || '').trim() !== 'finished') return false;
-        if (toScore(r[6]) === null || toScore(r[7]) === null) return false;
-        if (!days) return true;
-        const k = new Date(r[4] || '').getTime();
-        return Number.isFinite(k) && k >= cut;
-      });
-      console.log(`🔄 [finalize-all] ${fin.length} матчей`);
+      const fin = md.filter(r => isDataRow(r, 'match_id') && String(r[5] || '').trim() === 'finished' && toScore(r[6]) !== null && toScore(r[7]) !== null && (!days || new Date(r[4] || '').getTime() >= cut));
       const ds = new Set(); let p = 0, e = 0;
       for (const r of fin) {
         const mid = String(r[0]).trim();
         try {
           await recalculatePointsForMatch(mid, toScore(r[6]), toScore(r[7]));
-          p++;
-          const k = getMatchdayKey(r[4]);
-          if (k) ds.add(k);
-          if (p % 5 === 0) console.log(`[finalize-all] ${p}/${fin.length}`);
-        } catch (err) { console.error(`Match ${mid}:`, err.message); e++; }
+          p++; const k = getMatchdayKey(r[4]); if (k) ds.add(k);
+        } catch (err) { e++; }
         await sleep(500);
       }
       for (const k of ds) {
-        try {
-          const s = await checkMatchdayStreakBonus(k);
-          const pr = await checkRoundPrizes(k);
-          if ((s && s.awardedCount > 0) || (pr && pr.awardedCount > 0)) console.log(`[finalize-all] ${k}: streak ${s?.awardedCount||0}, prize ${pr?.awardedCount||0}`);
-        } catch (err) { console.error(`Matchday ${k}:`, err.message); }
+        try { await checkMatchdayStreakBonus(k); await checkRoundPrizes(k); } catch (err) {}
       }
-      const duels = await settleAllPendingDuels();
-      console.log(`✅ [finalize-all] DONE: ${p} матчей, ${e} ошибок, duels settled ${duels.settled}, refunded ${duels.refunded}`);
-    } catch (e) { console.error('❌ [finalize-all] FATAL:', e); }
+      await settleAllPendingDuels();
+    } catch (e) {}
     finally { heavyJobRunning = false; }
   })();
 }));
-
 app.post('/api/admin/reset-season', requireAdmin, asyncHandler(async (req, res) => {
   const lbl = String(req.body?.seasonLabel || `${SEASON}-final`).trim();
   const t = await calculateSeasonTitles();
@@ -2875,7 +2850,7 @@ app.post('/api/admin/reset-season', requireAdmin, asyncHandler(async (req, res) 
   if (t.risky) addB(t.risky.userId, 'risky');
   t.wild_round.forEach(w => addB(w.uid, 'wild_round'));
   if (rows.length) await appendRows('SeasonBadges', rows);
-  const u = await getSheetData('Users', 'A:R');
+  const u = await getSheetData('Users', 'A:W');
   const upd = [];
   u.forEach((r, i) => {
     if (!isDataRow(r, 'user_id')) return;
@@ -2931,7 +2906,7 @@ app.get('/api/user-points-history/:userId', asyncHandler(async (req, res) => {
   res.json([...daily.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([d, pts]) => ({ date: d, label: new Date(`${d}T00:00:00Z`).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', timeZone: 'UTC' }), points: pts })));
 }));
 app.get('/api/standings-last-round', asyncHandler(async (req, res) => {
-  const { Matches: m, Predictions: p, Users: u } = await batchGetSheets([{ sheet: 'Matches', range: 'A:J' }, { sheet: 'Predictions', range: 'A:K' }, { sheet: 'Users', range: 'A:R' }]);
+  const { Matches: m, Predictions: p, Users: u } = await batchGetSheets([{ sheet: 'Matches', range: 'A:J' }, { sheet: 'Predictions', range: 'A:K' }, { sheet: 'Users', range: 'A:W' }]);
   const fm = m.filter(r => isDataRow(r, 'match_id') && String(r[5] || '').trim() === 'finished').map(r => ({ matchId: String(r[0]).trim(), ts: new Date(r[8] || r[4] || '').getTime() || 0 })).filter(x => x.ts > 0).sort((a, b) => b.ts - a.ts);
   if (!fm.length) return res.json([]);
   const cut = fm[0].ts - 3 * 86400000;
@@ -2976,12 +2951,12 @@ app.post('/api/auth', asyncHandler(async (req, res) => {
   if (!user?.id && ALLOW_PLAIN_USER_ID && isNotEmpty(req.body.userId)) user = { id: req.body.userId, username: req.body.username || '', first_name: req.body.firstName || '', last_name: req.body.lastName || '' };
   if (!user?.id) return res.status(400).json({ error: 'userId required' });
   const uid = String(user.id).trim();
-  const u = await getSheetData('Users', 'A:R');
+  const u = await getSheetData('Users', 'A:W');
   const existing = u.find(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
   if (!existing) {
     let dn = user.first_name || user.username || 'User';
     if (user.last_name && user.first_name) dn = `${user.first_name} ${user.last_name}`;
-    await appendRows('Users', [[uid, user.username || '', dn, new Date().toISOString(), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, req.body.refId || '', 'FALSE']]);
+    await appendRows('Users', [[uid, user.username || '', dn, new Date().toISOString(), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, req.body.refId || '', 'FALSE', 'TRUE', 'TRUE', 'TRUE', 'TRUE', 'FALSE']]);
     return res.json({ userId: uid, displayName: dn });
   }
   res.json({ userId: uid, displayName: existing[2] || existing[1] || 'User' });
@@ -3052,7 +3027,7 @@ app.post('/api/admin/match-result', requireAdmin, asyncHandler(async (req, res) 
 }));
 app.get('/api/match-predictions/:matchId', asyncHandler(async (req, res) => {
   const mid = String(req.params.matchId || '').trim();
-  const { Predictions: p, Users: u } = await batchGetSheets([{ sheet: 'Predictions', range: 'A:K' }, { sheet: 'Users', range: 'A:R' }]);
+  const { Predictions: p, Users: u } = await batchGetSheets([{ sheet: 'Predictions', range: 'A:K' }, { sheet: 'Users', range: 'A:W' }]);
   const lm = getLatestPredictionMap(p);
   const mp = [...lm.values()].map(it => p[it.idx]).filter(r => r && String(r[2] || '').trim() === mid);
   const names = new Map(); u.forEach(row => { if (isDataRow(row, 'user_id')) names.set(String(row[0]).trim(), row[2] || row[1] || String(row[0]).trim()); });
@@ -3094,7 +3069,7 @@ app.get('/api/match-odds/:matchId', asyncHandler(async (req, res) => {
   res.json({ enabled: true, odds: o });
 }));
 app.get('/api/standings', asyncHandler(async (req, res) => {
-  const ud = await getSheetData('Users', 'A:R');
+  const ud = await getSheetData('Users', 'A:W');
   const table = ud.filter(row => isDataRow(row, 'user_id')).map(row => ({
     userId: String(row[0] || '').trim(), username: row[1] || '', displayName: row[2] || row[1] || 'User',
     registrationDate: row[3] || '', totalPoints: toNum(row[4], 0),
