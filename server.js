@@ -35,7 +35,6 @@ const ODDS_SPORT_KEY = process.env.ODDS_SPORT_KEY || 'soccer_uefa_champions_leag
 const ODDS_CACHE_TTL_MS = 60 * 60 * 1000;
 let oddsCache = { fetchedAt: 0, events: [] };
 
-// Расширили Users до 23 колонок (18 старых + 5 новых)
 const EXPECTED_COLUMNS = {
   Users: 23, Predictions: 11, Matches: 10, MatchEvents: 7,
   FantikiTransactions: 7, Duels: 9, DuelBets: 7, QuestsProgress: 5,
@@ -290,7 +289,6 @@ async function migrateFantiki() {
     for (const i of [12,13,14,15]) if (p[i] === '' || p[i] == null) { p[i] = 0; ch = true; }
     if (p[16] === '' || p[16] == null) { p[16] = ''; ch = true; }
     if (p[17] === '' || p[17] == null) { p[17] = 'FALSE'; ch = true; }
-    // Настройки уведомлений
     for (const i of [18,19,20,21]) if (p[i] === '' || p[i] == null) { p[i] = 'TRUE'; ch = true; }
     if (p[22] === '' || p[22] == null) { p[22] = 'FALSE'; ch = true; }
     if (ch) { userUpdates.push({ rowIndex: idx, values: p }); result.usersInitialized++; }
@@ -336,9 +334,7 @@ async function notifyUser(userId, type, text) {
     const row = usersData.find(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid);
     if (!row) return;
     const p = padRow(row, EXPECTED_COLUMNS.Users);
-    
-    if (String(p[22]).toUpperCase() === 'TRUE') return; // Бот заблокирован
-    
+    if (String(p[22]).toUpperCase() === 'TRUE') return;
     const types = { reminder: 18, results: 19, prizes: 20, duels: 21 };
     const idx = types[type];
     if (idx !== undefined && String(p[idx]).toUpperCase() !== 'TRUE') return;
@@ -371,7 +367,12 @@ async function awardFantiki(userId, amount, reason, refId = '', idempotencyKey =
   const user = padRow(usersData[userIndex], EXPECTED_COLUMNS.Users);
   const oldBal = toNum(user[12], 0), oldTotal = toNum(user[13], 0);
   const newBal = Math.max(0, oldBal + amt);
-  const newTotal = amt > 0 ? oldTotal + amt : oldTotal;
+  
+  // ФИКС: Не считаем заработком возвраты и корректировки
+  const isRefundReason = ['duel_refund', 'duel_stake', 'prediction_correction'].includes(String(reason || ''));
+  const countsAsEarned = amt > 0 && !isRefundReason;
+  const newTotal = countsAsEarned ? oldTotal + amt : oldTotal;
+
   user[12] = newBal; user[13] = newTotal; user[14] = calculateLevel(newTotal);
   await writeRow('Users', userIndex, user);
 
@@ -948,7 +949,6 @@ async function joinDuel(userId, duelId, ph, pa) {
   upd[7] = newPot; upd[4] = newSt;
   await writeRow('Duels', dIdx, upd);
 
-  // Уведомление создателю
   const creatorName = (await getSheetData('Users', 'A:W')).find(r => isDataRow(r, 'user_id') && String(r[0]).trim() === uid)?.[2] || 'Игрок';
   await notifyUser(creatorId, 'duels', `⚔️ <b>${creatorName}</b> вступил в твою дуэль на матч <b>${match[2]} — ${match[3]}</b>.\nСтавка: ${s} 🪙, банк теперь ${newPot} 🪙.`);
 
@@ -1444,7 +1444,6 @@ async function recalculatePointsForMatch(matchId, hs, as) {
     ta += amt;
   }
 
-  // Уведомления о результатах
   if (matchRow && String(matchRow[5]).trim() === 'finished') {
     for (const [uid] of userDeltas) {
       const predRow = p.find(r => isDataRow(r, 'prediction_id') && String(r[1]).trim() === uid && String(r[2]).trim() === mid);
@@ -1644,6 +1643,38 @@ async function recalculateAll() {
   await batchWriteRows('Predictions', pu);
   await batchWriteRows('Users', uu);
   return fin.size;
+}
+
+async function recalcTotalEarnedAll() {
+  const { Users: u, FantikiTransactions: tx } = await batchGetSheets([{ sheet: 'Users', range: 'A:W' }, { sheet: 'FantikiTransactions', range: 'A:G' }]);
+  const txByUser = new Map();
+  tx.forEach(r => {
+    if (!isDataRow(r, 'tx_id')) return;
+    const uid = String(r[1] || '').trim();
+    const amt = toNum(r[2], 0);
+    const reason = String(r[3] || '').trim();
+    if (!uid) return;
+    if (!txByUser.has(uid)) txByUser.set(uid, 0);
+    const isRefundReason = ['duel_refund', 'duel_stake', 'prediction_correction'].includes(reason);
+    if (amt > 0 && !isRefundReason) {
+      txByUser.set(uid, txByUser.get(uid) + amt);
+    }
+  });
+
+  const updates = [];
+  u.forEach((row, idx) => {
+    if (!isDataRow(row, 'user_id')) return;
+    const uid = String(row[0] || '').trim();
+    const p = padRow(row, EXPECTED_COLUMNS.Users);
+    const trueTotal = txByUser.get(uid) || 0;
+    if (p[13] !== trueTotal) {
+      p[13] = trueTotal;
+      p[14] = calculateLevel(trueTotal);
+      updates.push({ rowIndex: idx, values: p });
+    }
+  });
+  if (updates.length) await batchWriteRows('Users', updates);
+  return { usersProcessed: u.length - 1, usersUpdated: updates.length };
 }
 
 async function getUserPredictionsResponse(userId, query = {}) {
@@ -2156,7 +2187,6 @@ async function processCallbackQuery(cb) {
   if (data.startsWith('matches_')) {
     const dayKey = data.replace('matches_', '');
     await callTelegram('answerCallbackQuery', { callback_query_id: cb.id });
-    // Удаляем старое сообщение с кнопками
     await callTelegram('deleteMessage', { chat_id: chatId, message_id: cb.message.message_id }).catch(() => {});
     const fakeMsg = { chat: { id: chatId }, from: cb.from, text: '/matches' };
     await cmdMatches(fakeMsg, dayKey);
@@ -2220,7 +2250,6 @@ async function processTelegramMessage(msg) {
       await sendPlain(chatId, `✅ <b>Прогноз сохранен!</b>\n${state.home} <b>${pH}:${pA}</b> ${state.away}`);
       userPredictState.delete(uid);
 
-      // Редактируем сообщение с кнопками (авто-обновление)
       try {
         const { Matches: allM, Predictions: allP } = await batchGetSheets([{ sheet: 'Matches', range: 'A:J' }, { sheet: 'Predictions', range: 'A:K' }]);
         const allMatches = allM.filter(r => isDataRow(r, 'match_id'));
@@ -2229,15 +2258,9 @@ async function processTelegramMessage(msg) {
         
         const opts = buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {};
         await callTelegram('editMessageText', {
-          chat_id: chatId,
-          message_id: state.messageId,
-          text: newText,
-          parse_mode: 'HTML',
-          ...opts
+          chat_id: chatId, message_id: state.messageId, text: newText, parse_mode: 'HTML', ...opts
         });
-      } catch (editErr) {
-        console.error('Edit message error:', editErr.message);
-      }
+      } catch (editErr) { console.error('Edit message error:', editErr.message); }
       
       return;
     } else if (text === 'Отмена' || text === '/cancel') {
@@ -2365,8 +2388,7 @@ app.post(WEBHOOK_PATH, (req, res) => {
   res.status(200).json({ ok: true });
   if (req.body?.pre_checkout_query) {
     callTelegram('answerPreCheckoutQuery', {
-      pre_checkout_query_id: req.body.pre_checkout_query.id,
-      ok: true
+      pre_checkout_query_id: req.body.pre_checkout_query.id, ok: true
     }).catch(console.error);
   }
   if (req.body?.message) processTelegramMessage(req.body.message).catch(e => console.error('Webhook:', e.message));
@@ -2403,14 +2425,12 @@ setInterval(async () => {
         if (!isDataRow(row, 'user_id')) continue;
         const uid = String(row[0]).trim();
         const pRow = padRow(row, EXPECTED_COLUMNS.Users);
-        
-        // Пропускаем тех, кто уже сделал прогноз или отключил напоминания
         if (usersWhoPredict.has(`${uid}|${mid}`)) continue;
         if (String(pRow[18]).toUpperCase() !== 'TRUE') continue;
-        if (String(pRow[22]).toUpperCase() === 'TRUE') continue; // bot_blocked
+        if (String(pRow[22]).toUpperCase() === 'TRUE') continue;
 
         await callTelegram('sendMessage', { chat_id: uid, text, parse_mode: 'HTML', ...opts }).catch(() => {});
-        await sleep(50); // anti-flood
+        await sleep(50);
       }
       remindedMatches.add(mid);
     }
@@ -2840,6 +2860,17 @@ app.post('/api/admin/finalize-all', requireAdmin, asyncHandler(async (req, res) 
     finally { heavyJobRunning = false; }
   })();
 }));
+
+// НОВЫЙ ЭНДПОИНТ ДЛЯ ПЕРЕРАСЧЁТА TOTAL_EARNED_SEASON
+app.post('/api/admin/recalc-total-earned', requireAdmin, asyncHandler(async (req, res) => {
+  try {
+    const r = await recalcTotalEarnedAll();
+    res.json({ success: true, ...r });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+}));
+
 app.post('/api/admin/reset-season', requireAdmin, asyncHandler(async (req, res) => {
   const lbl = String(req.body?.seasonLabel || `${SEASON}-final`).trim();
   const t = await calculateSeasonTitles();
