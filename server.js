@@ -356,7 +356,9 @@ async function awardFantiki(userId, amount, reason, refId = '', idempotencyKey =
   if (idempotencyKey) {
     const txData = await getSheetData('FantikiTransactions', 'A:G');
     const exists = txData.some(r => isDataRow(r, 'tx_id')
-      && String(r[1] || '').trim() === uid && `${r[3]}|${r[4]}` === idempotencyKey);
+      && String(r[1] || '').trim() === uid
+      && String(r[3] || '').trim() === String(reason || '').trim()
+      && String(r[4] || '').trim() === String(refId || '').trim());
     if (exists) return { success: false, error: 'Already awarded', idempotent: true };
   }
 
@@ -368,7 +370,6 @@ async function awardFantiki(userId, amount, reason, refId = '', idempotencyKey =
   const oldBal = toNum(user[12], 0), oldTotal = toNum(user[13], 0);
   const newBal = Math.max(0, oldBal + amt);
   
-  // ФИКС: Не считаем заработком возвраты и корректировки
   const isRefundReason = ['duel_refund', 'duel_stake', 'prediction_correction'].includes(String(reason || ''));
   const countsAsEarned = amt > 0 && !isRefundReason;
   const newTotal = countsAsEarned ? oldTotal + amt : oldTotal;
@@ -1646,33 +1647,66 @@ async function recalculateAll() {
 }
 
 async function recalcTotalEarnedAll() {
-  const { Users: u, FantikiTransactions: tx } = await batchGetSheets([{ sheet: 'Users', range: 'A:W' }, { sheet: 'FantikiTransactions', range: 'A:G' }]);
-  const txByUser = new Map();
+  const { Users: u, FantikiTransactions: tx } = await batchGetSheets([
+    { sheet: 'Users', range: 'A:W' }, { sheet: 'FantikiTransactions', range: 'A:G' }
+  ]);
+
+  const idempotentReasons = new Set([
+    'duel_refund', 'duel_stake', 'duel_win',
+    'quest_predict_5', 'quest_predict_all', 'quest_first_exact', 'quest_three_outcomes',
+    'daily_streak_bonus', 'round_prize', 'daily_login', 'referral_bonus',
+  ]);
+
+  const userTx = new Map();
   tx.forEach(r => {
     if (!isDataRow(r, 'tx_id')) return;
     const uid = String(r[1] || '').trim();
-    const amt = toNum(r[2], 0);
-    const reason = String(r[3] || '').trim();
     if (!uid) return;
-    if (!txByUser.has(uid)) txByUser.set(uid, 0);
-    const isRefundReason = ['duel_refund', 'duel_stake', 'prediction_correction'].includes(reason);
-    if (amt > 0 && !isRefundReason) {
-      txByUser.set(uid, txByUser.get(uid) + amt);
-    }
+    if (!userTx.has(uid)) userTx.set(uid, []);
+    userTx.get(uid).push({
+      txId: String(r[0] || '').trim(),
+      amt: toNum(r[2], 0),
+      reason: String(r[3] || '').trim(),
+      refId: String(r[4] || '').trim(),
+    });
   });
 
   const updates = [];
   u.forEach((row, idx) => {
     if (!isDataRow(row, 'user_id')) return;
     const uid = String(row[0] || '').trim();
+    const txs = userTx.get(uid) || [];
+
+    const seen = new Set();
+    const deduped = [];
+    for (const t of txs) {
+      const key = idempotentReasons.has(t.reason) ? `${t.reason}|${t.refId}` : `${t.txId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(t);
+    }
+
+    let balance = 0;
+    let earned = 0;
+    for (const t of deduped) {
+      balance += t.amt;
+      if (t.amt > 0 && !['duel_refund', 'duel_stake', 'prediction_correction'].includes(t.reason)) {
+        earned += t.amt;
+      }
+    }
+
     const p = padRow(row, EXPECTED_COLUMNS.Users);
-    const trueTotal = txByUser.get(uid) || 0;
-    if (p[13] !== trueTotal) {
-      p[13] = trueTotal;
-      p[14] = calculateLevel(trueTotal);
+    p[12] = Math.max(0, balance);
+    p[13] = earned;
+    p[14] = calculateLevel(earned);
+
+    const oldBal = toNum(row[12], 0);
+    const oldEarned = toNum(row[13], 0);
+    if (oldBal !== p[12] || oldEarned !== p[13]) {
       updates.push({ rowIndex: idx, values: p });
     }
   });
+
   if (updates.length) await batchWriteRows('Users', updates);
   return { usersProcessed: u.length - 1, usersUpdated: updates.length };
 }
@@ -2861,7 +2895,6 @@ app.post('/api/admin/finalize-all', requireAdmin, asyncHandler(async (req, res) 
   })();
 }));
 
-// НОВЫЙ ЭНДПОИНТ ДЛЯ ПЕРЕРАСЧЁТА TOTAL_EARNED_SEASON
 app.post('/api/admin/recalc-total-earned', requireAdmin, asyncHandler(async (req, res) => {
   try {
     const r = await recalcTotalEarnedAll();
